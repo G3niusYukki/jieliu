@@ -1,0 +1,4 @@
+# 本项目核心只用 Python 标准库，无需安装任何依赖（Python 3.9+ 即可）。
+#
+# 采集层用的 MediaCrawler 是独立项目，按它自己的 requirements 安装，
+# 不混到这里。详见 collectors/README.md。

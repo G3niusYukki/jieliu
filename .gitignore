@@ -1,0 +1,12 @@
+# 运行产生的真实数据不入库（保留样例）
+data/*.csv
+!data/leads.sample.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 系统
+.DS_Store
