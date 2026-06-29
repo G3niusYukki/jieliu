@@ -1,8 +1,5 @@
-# 运行产生的真实数据不入库（保留样例）
-data/*.csv
-!data/leads.sample.csv
-data/*.db
-data/*.db-journal data/*.db-wal data/*.db-shm
+# 运行产生的数据/状态不入库（截流链接.csv、seen.json 等）
+data/
 
 # 采集层：克隆的 MediaCrawler 与其输出不入库
 vendor/

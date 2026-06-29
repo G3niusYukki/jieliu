@@ -72,12 +72,5 @@
 
   "dedup": {
     "author_cooldown_days": 14
-  },
-
-  "paths": {
-    "leads": "data/leads.csv",
-    "queue": "data/queue.csv",
-    "history": "data/history.csv",
-    "db": "data/jieliu.db"
   }
 }
