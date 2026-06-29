@@ -52,7 +52,8 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config()
-    intent = cfg["intent_signals"]
+    # 意图词：新版 config 拆成 强/弱 两档；兼容旧版 intent_signals
+    intent = (cfg.get("intent_strong", []) + cfg.get("intent_weak", [])) or cfg.get("intent_signals", [])
 
     leads = read_csv(path_of("leads"))
     queue = read_csv(path_of("queue"))

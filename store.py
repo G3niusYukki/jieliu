@@ -21,7 +21,7 @@ QUEUE_FIELDS = ["id", "platform", "content_id", "url", "title", "author_id",
 
 # 采集层产出的原始线索字段
 LEADS_FIELDS = ["platform", "content_id", "url", "title", "author_id",
-                "author_name", "content_excerpt", "publish_time",
+                "author_name", "content_excerpt", "ip_location", "publish_time",
                 "likes", "comments_count", "crawl_time"]
 
 VALID_STATUS = {"new", "opened", "posted", "skipped", "failed"}

@@ -25,6 +25,26 @@ def load_config():
         return json.load(f)
 
 
+def validate_config(cfg):
+    """配置体检：缺键/结构不对时，用中文人话指出缺哪个，避免运营改崩 config 后跑出诡异结果。"""
+    missing = []
+    for key, subs in {
+        "keyword_tiers": ["high", "mid", "low"],
+        "scoring": ["tier_base", "priority_cut", "intent_cap"],
+        "paths": ["leads", "queue", "history"],
+    }.items():
+        if not isinstance(cfg.get(key), dict):
+            missing.append(key)
+            continue
+        missing += [f"{key}.{s}" for s in subs if s not in cfg[key]]
+    missing += [k for k in ("exclude_words", "intent_strong", "intent_weak") if k not in cfg]
+    if missing:
+        raise SystemExit(
+            "config.json 配置不完整，缺少：" + "、".join(missing) +
+            "\n请对照 README / 默认 config.json 补全后重试。"
+        )
+
+
 def load_comment_templates():
     with open(ROOT / "comments.json", encoding="utf-8") as f:
         return json.load(f)["templates"]
@@ -71,9 +91,18 @@ def pick_template(content_id, templates, priority):
 def score_lead(lead, cfg, now):
     """对单条线索打分。返回 (score, priority, matched_keywords, intent_hits) 或 None（被排除/不相关）。"""
     text = f"{lead.get('title','')} {lead.get('content_excerpt','')}"
+    author = lead.get("author_name", "")
 
     # 1) 硬排除：招聘/加盟/培训/骗局…
     if match_terms(text, cfg["exclude_words"]):
+        return None
+
+    # 1.1) 科普/B2B/国内大件等「像物流但不是回国买家」的主题 -> 丢弃
+    if match_terms(text, cfg.get("negative_topic_words", [])):
+        return None
+
+    # 1.2) 作者本身是货代/集运/物流账号（卖家/同行）-> 丢弃，避免同行互相占坑
+    if match_terms(author, cfg.get("seller_author_words", [])):
         return None
 
     # 2) 关键词分级（取命中的最高级）
@@ -97,9 +126,14 @@ def score_lead(lead, cfg, now):
     sc = cfg["scoring"]
     score = sc["tier_base"][top_tier]
 
-    # 3) 意图信号（“怎么寄/多少钱/清关麻烦吗”——真正的高价值信号，常在评论/正文里）
-    intent_hits = match_terms(text, cfg["intent_signals"])
-    score += min(len(intent_hits) * sc["intent_each"], sc["intent_cap"])
+    # 3) 意图信号：强意图（多少钱/报价/求渠道）权重 > 弱意图（怎么发/多久能到）
+    #    —— 真正的高价值购买信号，常在评论/正文里
+    strong = match_terms(text, cfg.get("intent_strong", []))
+    weak = match_terms(text, cfg.get("intent_weak", []))
+    intent_hits = strong + weak
+    intent_score = (len(strong) * sc.get("intent_strong_each", 30)
+                    + len(weak) * sc.get("intent_weak_each", 15))
+    score += min(intent_score, sc["intent_cap"])
 
     # 4) 时效加分（越新越好）
     pub = parse_dt(lead.get("publish_time", ""))
@@ -114,6 +148,10 @@ def score_lead(lead, cfg, now):
     cc = to_int(lead.get("comments_count"))
     if 1 <= cc <= sc["engagement_active_max_comments"]:
         score += sc["engagement_active_bonus"]
+
+    # 5.5) 负向信号：已找到渠道/已成交/勿扰 -> 降权，别在死线索上耗（也降低骚扰投诉=封控）
+    if match_terms(text, cfg.get("negative_signals", [])):
+        score -= sc.get("negative_signal_penalty", 40)
 
     # 6) 优先级分桶
     cut = sc["priority_cut"]
@@ -143,6 +181,7 @@ def build_dedup_index(history, cooldown_days, now):
 
 def main():
     cfg = load_config()
+    validate_config(cfg)
     templates = load_comment_templates()
     now = datetime.now()
 
