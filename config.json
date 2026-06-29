@@ -77,6 +77,7 @@
   "paths": {
     "leads": "data/leads.csv",
     "queue": "data/queue.csv",
-    "history": "data/history.csv"
+    "history": "data/history.csv",
+    "db": "data/jieliu.db"
   }
 }

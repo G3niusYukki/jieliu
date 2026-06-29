@@ -49,21 +49,25 @@ def read_queue(path):
         return list(csv.DictReader(f))
 
 
-def run_pipeline(tmp, leads, history=None):
-    """在临时目录里跑一遍 score.main()，返回队列行。"""
+def run_pipeline(tmp, leads, processed=None):
+    """在临时目录里跑一遍 score.main()，返回队列行。每次用全新临时 db，不碰真实数据。"""
+    import store
     leads_p = tmp / "leads.csv"
     queue_p = tmp / "queue.csv"
-    hist_p = tmp / "history.csv"
+    db_p = tmp / "test.db"
+    db_p.unlink(missing_ok=True)
     write_leads(leads_p, leads)
-    if history is not None:
-        with open(hist_p, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=QUEUE_FIELDS)
-            w.writeheader()
-            for r in history:
-                w.writerow({k: r.get(k, "") for k in QUEUE_FIELDS})
+    if processed:                       # 预置「已触达过」的线索，用于验证去重/冷却
+        conn = store.connect(db_p)
+        store.init_db(conn)
+        for r in processed:
+            store.upsert_lead(r, conn=conn)
+            store.mark_processed(r["id"], "posted", conn=conn)
+        conn.close()
 
     cfg = score.load_config()
-    cfg["paths"] = {"leads": str(leads_p), "queue": str(queue_p), "history": str(hist_p)}
+    cfg["paths"] = {"leads": str(leads_p), "queue": str(queue_p),
+                    "history": str(tmp / "history.csv"), "db": str(db_p)}
     orig = score.load_config
     score.load_config = lambda: cfg
     try:
@@ -113,12 +117,12 @@ def main():
         check("a1 分数高于 a4", int(q[0]["score"]) > int(q[1]["score"]))
         check("每条都生成了评论草稿", all(r["comment_text"].strip() for r in q))
 
-        print("\n用例 2：历史去重 + 作者冷却")
-        history = [{"content_id": "a1", "url": "u/a1", "author_id": "ua",
-                    "processed_at": days_ago(2), "status": "posted"}]
-        q2 = run_pipeline(tmp, leads, history=history)
+        print("\n用例 2：已触达去重 + 作者冷却（db 真相源）")
+        processed = [{"id": "xiaohongshu-a1", "platform": "xiaohongshu",
+                      "content_id": "a1", "url": "u/a1", "author_id": "ua"}]
+        q2 = run_pipeline(tmp, leads, processed=processed)
         ids2 = [r["content_id"] for r in q2]
-        check("历史里处理过的 a1 不再出现", "a1" not in ids2)
+        check("已触达过的 a1 不再出现", "a1" not in ids2)
         check("其余有效线索仍保留（a4）", "a4" in ids2)
 
         print("\n用例 3：脚本能独立运行（语法/导入无误）")

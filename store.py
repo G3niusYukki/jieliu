@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-store.py —— 共享的数据层（字段定义 / 配置加载 / CSV 读写 / 状态流转）
+store.py —— 共享数据层（sqlite 单一真相源 + 兼容 CSV）
 
-被 add_lead.py、serve.py、report.py 复用，保证它们和 score.py / publish_assist.py
-对同一套字段和文件路径。只读写本地 CSV，不联网、不发布。
+为什么用 sqlite（Python 自带，无需 pip 安装）：
+  线索在「发出评论」之后还要回填——是否对外可见(影子限流)、对方是否回复、是否加到私域、
+  报价、成交金额——这些都晚于 posted 发生。旧的 CSV 方案 posted 即删行，没法回填。
+  sqlite 让每条线索成为一行可持续更新的记录，支持转化漏斗与多账号归因。
+
+数据形态：
+  - data/leads.csv   采集层原始交接格式（adapter 产出，仍是 CSV）
+  - data/jieliu.db   线索全生命周期的唯一真相源（leads 表）
+  - data/queue.csv   由 db 导出的只读快照（给 inspect / 人工查看 / 向后兼容）
+
+只读写本地文件，不联网、不发布。
 """
 
 import csv
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-# 队列 / 历史的统一字段
+# 队列/快照字段（queue.csv 仍按这个，向后兼容 inspect 与历史脚本）
 QUEUE_FIELDS = ["id", "platform", "content_id", "url", "title", "author_id",
                 "author_name", "matched_keywords", "intent_hits", "priority",
                 "score", "status", "comment_text", "created_at", "processed_at", "note"]
@@ -25,6 +35,26 @@ LEADS_FIELDS = ["platform", "content_id", "url", "title", "author_id",
                 "likes", "comments_count", "crawl_time"]
 
 VALID_STATUS = {"new", "opened", "posted", "skipped", "failed"}
+
+# 转化漏斗阶段（有序）：发出 -> 对外可见 -> 对方回复 -> 加到私域 -> 报价 -> 成交
+FUNNEL_STAGES = ["new", "posted", "replied", "added", "quoted", "deal", "dead"]
+
+# db leads 表的全部列（id 为主键）
+LEAD_COLUMNS = [
+    "id", "lead_type", "platform", "content_id", "url", "title",
+    "author_id", "author_name", "ip_location",
+    "parent_content_id", "comment_id", "target",
+    "matched_keywords", "intent_hits", "priority", "score",
+    "comment_text", "status", "stage", "visible", "visible_checked_at",
+    "account", "deal_amount", "note",
+    "created_at", "posted_at", "replied_at", "added_at", "deal_at", "processed_at",
+]
+# 重打分时只刷新「打分/内容」类字段，绝不动「生命周期」字段（status/stage/visible/账号/成交/时间戳），
+# 也不动 comment_text（避免覆盖运营已改写的草稿）
+_RESCORE_FIELDS = ["lead_type", "platform", "content_id", "url", "title",
+                   "author_id", "author_name", "ip_location",
+                   "parent_content_id", "comment_id", "target",
+                   "matched_keywords", "intent_hits", "priority", "score"]
 
 
 def now_str():
@@ -37,9 +67,15 @@ def load_config():
 
 
 def path_of(key):
-    """从 config.paths 取相对路径并解析成绝对路径。key ∈ {leads, queue, history}"""
-    return ROOT / load_config()["paths"][key]
+    """从 config.paths 取相对路径并解析成绝对路径。key ∈ {leads, queue, history, db}"""
+    paths = load_config().get("paths", {})
+    default = {"leads": "data/leads.csv", "queue": "data/queue.csv",
+              "history": "data/history.csv", "db": "data/jieliu.db"}
+    rel = paths.get(key, default.get(key))
+    return ROOT / rel
 
+
+# ---------------- CSV 基础读写（leads.csv 原始 / queue.csv 快照用） ----------------
 
 def read_csv(path):
     p = Path(path)
@@ -76,29 +112,176 @@ def append_csv(path, row, fields):
         w.writerow({k: row.get(k, "") for k in fields})
 
 
-def mark_processed(item_id, status, comment_text=None, note=""):
-    """把队列里某条标成已处理：写入 history.csv，并从 queue.csv 移除。
+# ---------------- sqlite 数据层 ----------------
 
-    返回被处理的行（dict）；找不到返回 None。给 CLI 和 Web 控制台共用，行为一致。
-    """
+def connect(db_path=None):
+    p = Path(db_path) if db_path else path_of("db")
+    if not p.is_absolute():
+        p = ROOT / p
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db(conn=None):
+    own = conn is None
+    conn = conn or connect()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS leads (
+            id TEXT PRIMARY KEY,
+            lead_type TEXT DEFAULT 'note',
+            platform TEXT, content_id TEXT, url TEXT, title TEXT,
+            author_id TEXT, author_name TEXT, ip_location TEXT,
+            parent_content_id TEXT, comment_id TEXT, target TEXT,
+            matched_keywords TEXT, intent_hits TEXT,
+            priority TEXT, score INTEGER,
+            comment_text TEXT,
+            status TEXT DEFAULT 'new',
+            stage TEXT DEFAULT 'new',
+            visible TEXT DEFAULT '',
+            visible_checked_at TEXT,
+            account TEXT,
+            deal_amount REAL,
+            note TEXT,
+            created_at TEXT, posted_at TEXT, replied_at TEXT,
+            added_at TEXT, deal_at TEXT, processed_at TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_author ON leads(author_id)")
+    conn.commit()
+    if own:
+        conn.close()
+
+
+def upsert_lead(row, conn=None):
+    """插入一条新线索；若 id 已存在，只刷新打分/内容字段，保留其生命周期（status/stage/可见性/成交…）。"""
+    own = conn is None
+    conn = conn or connect()
+    data = {k: row.get(k) for k in LEAD_COLUMNS}
+    cols = ", ".join(LEAD_COLUMNS)
+    ph = ", ".join("?" for _ in LEAD_COLUMNS)
+    setters = ", ".join(f"{c}=excluded.{c}" for c in _RESCORE_FIELDS)
+    conn.execute(
+        f"INSERT INTO leads ({cols}) VALUES ({ph}) "
+        f"ON CONFLICT(id) DO UPDATE SET {setters}",
+        [data.get(c) for c in LEAD_COLUMNS],
+    )
+    conn.commit()
+    if own:
+        conn.close()
+
+
+def dedup_index(cooldown_days, now=None, conn=None):
+    """从「已触达过」(status 非 new) 的行建去重索引：已处理的 content_id / url，及每个作者最近处理时间。"""
+    own = conn is None
+    conn = conn or connect()
+    seen_ids, seen_urls, author_last = set(), set(), {}
+    for r in conn.execute("SELECT content_id, url, author_id, processed_at, created_at "
+                          "FROM leads WHERE status != 'new'"):
+        if r["content_id"]:
+            seen_ids.add(r["content_id"])
+        if r["url"]:
+            seen_urls.add(r["url"])
+        a = r["author_id"]
+        t = _parse_dt(r["processed_at"]) or _parse_dt(r["created_at"])
+        if a and t and (a not in author_last or t > author_last[a]):
+            author_last[a] = t
+    if own:
+        conn.close()
+    return seen_ids, seen_urls, author_last
+
+
+def get_queue(status="new", conn=None):
+    own = conn is None
+    conn = conn or connect()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM leads WHERE status = ? ORDER BY score DESC", (status,))]
+    if own:
+        conn.close()
+    return rows
+
+
+def get_lead(item_id, conn=None):
+    own = conn is None
+    conn = conn or connect()
+    r = conn.execute("SELECT * FROM leads WHERE id = ?", (item_id,)).fetchone()
+    if own:
+        conn.close()
+    return dict(r) if r else None
+
+
+def update_lead(item_id, conn=None, **fields):
+    """通用更新：写入给定字段（自动忽略未知列）。返回是否命中。"""
+    own = conn is None
+    conn = conn or connect()
+    cols = [k for k in fields if k in LEAD_COLUMNS]
+    if cols:
+        sets = ", ".join(f"{c}=?" for c in cols)
+        conn.execute(f"UPDATE leads SET {sets} WHERE id=?", [fields[c] for c in cols] + [item_id])
+        conn.commit()
+    ok = conn.execute("SELECT 1 FROM leads WHERE id=?", (item_id,)).fetchone() is not None
+    if own:
+        conn.close()
+    return ok
+
+
+def mark_processed(item_id, status, comment_text=None, note="", conn=None):
+    """标记一条线索的处理结果（posted/skipped/failed）。不删除行——后续可继续回填可见性/回复/成交。"""
     if status not in VALID_STATUS:
         raise ValueError(f"非法状态: {status}")
-    queue_path = path_of("queue")
-    history_path = path_of("history")
-    rows = read_csv(queue_path)
-    target, remaining = None, []
-    for r in rows:
-        if r.get("id") == item_id and target is None:
-            target = r
-        else:
-            remaining.append(r)
-    if target is None:
-        return None
-    target["status"] = status
+    own = conn is None
+    conn = conn or connect()
+    fields = {"status": status, "processed_at": now_str()}
+    if status == "posted":
+        fields["stage"] = "posted"
+        fields["posted_at"] = now_str()
+    elif status in ("skipped", "failed"):
+        fields["stage"] = "dead"
     if comment_text is not None:
-        target["comment_text"] = comment_text
-    target["note"] = note
-    target["processed_at"] = now_str()
-    append_csv(history_path, target, QUEUE_FIELDS)
-    write_csv(queue_path, remaining, QUEUE_FIELDS)
-    return target
+        fields["comment_text"] = comment_text
+    if note:
+        fields["note"] = note
+    ok = update_lead(item_id, conn=conn, **fields)
+    result = get_lead(item_id, conn=conn) if ok else None
+    if own:
+        conn.close()
+    return result
+
+
+def export_queue_csv(queue_path=None, conn=None):
+    """把 db 里 status=new 的线索导出成 queue.csv 快照（给 inspect / 人工查看 / 向后兼容）。"""
+    rows = get_queue("new", conn=conn)
+    write_csv(queue_path or path_of("queue"), rows, QUEUE_FIELDS)
+    return len(rows)
+
+
+def funnel_counts(conn=None):
+    """转化漏斗计数：按 stage 与 visible 汇总，并算成交额。"""
+    own = conn is None
+    conn = conn or connect()
+    by_stage = {s: 0 for s in FUNNEL_STAGES}
+    for r in conn.execute("SELECT stage, COUNT(*) c FROM leads GROUP BY stage"):
+        by_stage[r["stage"] or "new"] = r["c"]
+    by_status = {r["status"]: r["c"] for r in conn.execute(
+        "SELECT status, COUNT(*) c FROM leads GROUP BY status")}
+    by_visible = {(r["visible"] or "未核验"): r["c"] for r in conn.execute(
+        "SELECT visible, COUNT(*) c FROM leads WHERE status='posted' OR stage!='new' GROUP BY visible")}
+    total_deal = conn.execute("SELECT COALESCE(SUM(deal_amount),0) s FROM leads").fetchone()["s"]
+    deals = conn.execute("SELECT COUNT(*) c FROM leads WHERE stage='deal'").fetchone()["c"]
+    if own:
+        conn.close()
+    return {"by_stage": by_stage, "by_status": by_status, "by_visible": by_visible,
+            "deals": deals, "deal_amount": total_deal}
+
+
+def _parse_dt(s):
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(s).strip(), fmt)
+        except ValueError:
+            continue
+    return None

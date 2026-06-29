@@ -18,7 +18,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from store import ROOT, load_config, read_csv, mark_processed, path_of
+from store import (ROOT, load_config, read_csv, mark_processed, path_of,
+                   get_queue, init_db, update_lead)
 
 HOST, PORT = "127.0.0.1", 8765
 
@@ -128,9 +129,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/" or self.path.startswith("/index"):
             return self._send(200, PAGE, "text/html; charset=utf-8")
         if self.path.startswith("/api/queue"):
-            rows = read_csv(path_of("queue"))
-            rows = [r for r in rows if r.get("status") == "new"]
-            rows.sort(key=lambda r: int(r.get("score") or 0), reverse=True)
+            rows = get_queue("new")          # db 真相源（已按分数降序）
             return self._send(200, json.dumps(rows, ensure_ascii=False))
         return self._send(404, json.dumps({"error": "not found"}))
 
@@ -157,6 +156,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     load_config()  # 配置不存在就早点报错
+    init_db()      # 确保 db 表存在
     url = f"http://{HOST}:{PORT}/"
     print(f"控制台已启动：{url}  （Ctrl+C 退出）")
     try:

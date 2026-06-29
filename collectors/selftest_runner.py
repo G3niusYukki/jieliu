@@ -51,8 +51,9 @@ def main():
     leads = ROOT / "data" / "leads.csv"
     queue = ROOT / "data" / "queue.csv"
     history = ROOT / "data" / "history.csv"
-    data_files = [leads, queue, history]
-    # 备份真实数据，测试结束无条件还原（ingest 会写真实 data/leads.csv）
+    db = ROOT / "data" / "jieliu.db"
+    data_files = [leads, queue, history, db]
+    # 备份真实数据，测试结束无条件还原（ingest 写真实 leads.csv，score 子进程写真实 db/queue）
     backups = {f: f.read_bytes() for f in data_files if f.exists()}
 
     tmp_out = tempfile.TemporaryDirectory()

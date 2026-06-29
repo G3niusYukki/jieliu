@@ -17,6 +17,8 @@ import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import store
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -188,24 +190,28 @@ def main():
     validate_config(cfg)
     templates = load_comment_templates()
     now = datetime.now()
+    now_s = now.strftime("%Y-%m-%d %H:%M:%S")
 
     leads = read_csv(cfg["paths"]["leads"])
-    history = read_csv(cfg["paths"]["history"])
+    db_path = cfg["paths"].get("db") or "data/jieliu.db"
+    conn = store.connect(db_path)
+    store.init_db(conn)
+
+    # 去重/冷却索引：来自 db 里「已触达过」(status 非 new) 的行——发出后不删行，回填得以进行
     cooldown = timedelta(days=cfg["dedup"]["author_cooldown_days"])
-    seen_ids, seen_urls, author_last = build_dedup_index(
-        history, cfg["dedup"]["author_cooldown_days"], now
-    )
+    seen_ids, seen_urls, author_last = store.dedup_index(
+        cfg["dedup"]["author_cooldown_days"], now, conn=conn)
 
     stats = {"total": len(leads), "excluded": 0, "dup": 0, "cooldown": 0, "kept": 0}
     batch_ids = set()
-    rows = []
+    kept = []
 
     for lead in leads:
         cid = lead.get("content_id", "").strip()
         url = lead.get("url", "").strip()
         author = lead.get("author_id", "").strip()
 
-        # 去重：历史已处理 / 本批重复
+        # 去重：已触达过 / 本批重复
         if cid in seen_ids or url in seen_urls or cid in batch_ids:
             stats["dup"] += 1
             continue
@@ -222,44 +228,36 @@ def main():
         score, priority, matched, intent_hits = scored
         batch_ids.add(cid)
 
-        rows.append({
+        row = {
             "id": f"{lead.get('platform','')}-{cid}",
+            "lead_type": "note",
             "platform": lead.get("platform", ""),
-            "content_id": cid,
-            "url": url,
+            "content_id": cid, "url": url,
             "title": lead.get("title", ""),
             "author_id": author,
             "author_name": lead.get("author_name", ""),
+            "ip_location": lead.get("ip_location", ""),
             "matched_keywords": "|".join(matched),
             "intent_hits": "|".join(intent_hits),
-            "priority": priority,
-            "score": score,
-            "status": "new",
+            "priority": priority, "score": score,
             "comment_text": pick_template(cid, templates, priority),
-            "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "processed_at": "",
-            "note": "",
-        })
+            "status": "new", "stage": "new", "created_at": now_s,
+        }
+        # upsert：新线索入库为 new；已存在的只刷新分数/内容，保留其生命周期与已改写的草稿
+        store.upsert_lead(row, conn=conn)
+        kept.append(row)
 
-    # 按分数降序 —— 这就是你每天该从上往下处理的顺序
-    rows.sort(key=lambda r: r["score"], reverse=True)
-    stats["kept"] = len(rows)
-
-    fields = ["id", "platform", "content_id", "url", "title", "author_id",
-              "author_name", "matched_keywords", "intent_hits", "priority",
-              "score", "status", "comment_text", "created_at", "processed_at", "note"]
-    out = ROOT / cfg["paths"]["queue"]
-    with open(out, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        w.writerows(rows)
+    stats["kept"] = len(kept)
+    queue_n = store.export_queue_csv(cfg["paths"]["queue"], conn=conn)
+    conn.close()
 
     print(f"读取 {stats['total']} 条 -> 排除 {stats['excluded']} | "
-          f"去重 {stats['dup']} | 作者冷却 {stats['cooldown']} | 保留 {stats['kept']}")
-    print(f"已写入待处理队列：{cfg['paths']['queue']}")
-    if rows:
+          f"去重 {stats['dup']} | 作者冷却 {stats['cooldown']} | 本批新增/刷新 {stats['kept']}")
+    print(f"待处理队列共 {queue_n} 条（真相源 {db_path}，快照 {cfg['paths']['queue']}）")
+    kept.sort(key=lambda r: r["score"], reverse=True)
+    if kept:
         print("\n前几条（按优先级）：")
-        for r in rows[:5]:
+        for r in kept[:5]:
             print(f"  [{r['priority']:>4}] {r['score']:>3}  {r['platform']:<11} "
                   f"{r['title']}  «意图:{r['intent_hits'] or '-'}»")
 

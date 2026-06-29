@@ -127,7 +127,7 @@ def main():
         print("\n用例 B：合并后打分 / 排序 / 排除")
         cfg = score.load_config()
         cfg["paths"] = {"leads": str(leads), "queue": str(tmp / "queue.csv"),
-                        "history": str(tmp / "history.csv")}
+                        "history": str(tmp / "history.csv"), "db": str(tmp / "test.db")}
         orig = score.load_config
         score.load_config = lambda: cfg
         try:

@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-report.py —— 复盘统计（闭环的最后一环：记录 -> 洞察）
+report.py —— 复盘（闭环最后一环：记录 -> 洞察），从 db 出真实转化漏斗
 
-读 data/history.csv，汇总：处理总量、各状态占比、各平台/优先级分布、最近活跃。
-帮你判断「到底有没有带来线索」，再决定要不要继续投入。
+不再只看「发布率」，而是把线索的全生命周期摊开：
+  发现(new) -> 发出(posted) -> 对外可见(visible) -> 对方回复(replied)
+            -> 加到私域(added) -> 报价(quoted) -> 成交(deal / 金额)
+帮你判断「到底有没有带来成交」，并反向校准关键词/模板/账号。
 """
 
-from collections import Counter
-from datetime import datetime, timedelta
+import store
 
-from store import read_csv, path_of
-
-
-def parse_dt(s):
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.strptime((s or "").strip(), fmt)
-        except ValueError:
-            continue
-    return None
+STAGE_LABEL = {
+    "new": "待处理(new)", "posted": "已发出(posted)", "replied": "对方回复(replied)",
+    "added": "加到私域(added)", "quoted": "已报价(quoted)", "deal": "成交(deal)",
+    "dead": "跳过/失败(dead)",
+}
 
 
 def bar(n, total, width=24):
@@ -29,46 +25,59 @@ def bar(n, total, width=24):
     return "█" * filled + "·" * (width - filled)
 
 
+def pct(n, d):
+    return (n / d * 100) if d else 0.0
+
+
 def main():
-    rows = read_csv(path_of("history"))
-    if not rows:
-        print("还没有历史记录（data/history.csv 为空）。先用 publish_assist.py 或 Web 控制台处理几条。")
+    store.init_db()
+    conn = store.connect()
+    total = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
+    if not total:
+        print("db 里还没有线索。先 ./run.sh score 生成队列，再用 web/publish 处理几条。")
+        conn.close()
         return
 
-    total = len(rows)
-    by_status = Counter(r.get("status", "") for r in rows)
-    by_platform = Counter(r.get("platform", "") for r in rows)
-    by_priority = Counter(r.get("priority", "") for r in rows)
+    f = store.funnel_counts(conn=conn)
+    by_stage, by_visible = f["by_stage"], f["by_visible"]
+    # 触达=已发出及以后（不含 new/dead）
+    posted = sum(by_stage.get(s, 0) for s in ["posted", "replied", "added", "quoted", "deal"])
+    visible_yes = by_visible.get("yes", 0)
+    by_platform = {r["platform"]: r["c"] for r in conn.execute(
+        "SELECT platform, COUNT(*) c FROM leads GROUP BY platform")}
+    conn.close()
 
-    now = datetime.now()
-    last7 = sum(1 for r in rows
-                if (d := parse_dt(r.get("processed_at"))) and (now - d) <= timedelta(days=7))
+    print("=" * 52)
+    print(f"  线索总数 {total} 条")
+    print("=" * 52)
 
-    posted = by_status.get("posted", 0)
-    print("=" * 48)
-    print(f"  累计处理 {total} 条 ｜ 近 7 天 {last7} 条")
-    print("=" * 48)
+    print("\n转化漏斗：")
+    for s in store.FUNNEL_STAGES:
+        n = by_stage.get(s, 0)
+        if n or s in ("new", "posted", "deal"):
+            print(f"  {STAGE_LABEL.get(s, s):<16} {n:>4}  {bar(n, total)}")
 
-    print("\n按状态：")
-    for st in ["posted", "skipped", "failed", "opened", "new"]:
-        n = by_status.get(st, 0)
-        if n:
-            print(f"  {st:<8} {n:>4}  {bar(n, total)}  {n/total*100:4.0f}%")
+    print("\n可见性（已发出线索里）：")
+    if posted:
+        for k in ("yes", "no", "未核验"):
+            n = by_visible.get(k, 0)
+            label = {"yes": "对外可见", "no": "被折叠/限流", "未核验": "未核验"}[k]
+            print(f"  {label:<10} {n:>4}  {bar(n, posted)}")
+        if visible_yes == 0 and by_visible.get("未核验", 0):
+            print("  ⚠ 大量『未核验』——影子限流看不见，建议补『可见性核验』(下一步功能)")
+    else:
+        print("  （还没有已发出的线索）")
 
     print("\n按平台：")
-    for p, n in by_platform.most_common():
+    for p, n in sorted(by_platform.items(), key=lambda x: -x[1]):
         print(f"  {p or '未知':<12} {n:>4}  {bar(n, total)}")
 
-    print("\n按优先级：")
-    for pr in ["high", "mid", "low"]:
-        n = by_priority.get(pr, 0)
-        if n:
-            print(f"  {pr:<6} {n:>4}  {bar(n, total)}")
-
-    rate = posted / total * 100 if total else 0
-    print(f"\n发布率（posted/总）：{rate:.0f}%  ——  高优先级里 posted "
-          f"{sum(1 for r in rows if r.get('priority')=='high' and r.get('status')=='posted')} 条")
-    print("\n提示：长期看高优先级的发布率和后续回复，才知道这套排序值不值得继续。")
+    print("\n关键转化率：")
+    print(f"  发出率   posted/total      = {pct(posted, total):4.0f}%  ({posted}/{total})")
+    print(f"  可见率   visible/posted    = {pct(visible_yes, posted):4.0f}%  ({visible_yes}/{posted})")
+    print(f"  回复率   replied/posted    = {pct(by_stage.get('replied',0), posted):4.0f}%")
+    print(f"  成交数   deal              = {f['deals']} 单   成交额 ¥{f['deal_amount']:.0f}")
+    print("\n提示：发出≠被看到。可见率长期偏低 = 账号被影子限流，该换号/降频，而不是继续发。")
 
 
 if __name__ == "__main__":
