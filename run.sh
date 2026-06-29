@@ -8,6 +8,7 @@ case "${1:-help}" in
   demo)     cp -f data/leads.sample.csv data/leads.csv; "$PY" score.py ;;
   crawl)    "$PY" collectors/run_mediacrawler.py "${@:2}" ;;
   score)    "$PY" score.py ;;
+  inspect)  "$PY" inspect_leads.py "${@:2}" ;;
   add)      "$PY" add_lead.py ;;
   publish)  "$PY" publish_assist.py ;;
   web)      "$PY" serve.py ;;
@@ -20,6 +21,7 @@ case "${1:-help}" in
             例: ./run.sh crawl --platform xhs --max 15
   demo      用样例数据跑通打分（生成 data/queue.csv）
   score     去重+打分+排序
+  inspect   采集质量体检：量化看“搜索到不到位”（含 top 线索预览）
   add       手动录入线索
   publish   命令行人工辅助发布
   web       打开本地 Web 控制台
