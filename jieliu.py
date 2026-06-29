@@ -477,6 +477,25 @@ def _llm(prompt, system, max_tokens=800):
         raise RuntimeError(f"ARK 返回异常：{json.dumps(data, ensure_ascii=False)[:300]}")
 
 
+def list_ark_models():
+    """用当前 Key 拉取账号可用模型（OpenAI 兼容 GET /models）。"""
+    import urllib.request
+    import urllib.error
+    key, _model, base = _ark_settings()
+    if not key:
+        raise RuntimeError("未配置 ARK API Key。请先在「AI 设置」填入 Key 并保存，再刷新模型。")
+    req = urllib.request.Request(base + "/models", headers={"Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"获取模型失败 HTTP {e.code}：{e.read().decode('utf-8', 'ignore')[:300]}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"网络错误：{e.reason}")
+    ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+    return sorted(set(ids))
+
+
 _KW_SYSTEM = (
     "你是中文社媒获客的关键词策划。根据用户的【业务描述】，产出用于在小红书/抖音上搜索"
     "『潜在买家发帖或评论提问』的搜索词。要点：①站在消费者视角用大白话（例：海运回国、留学回国行李、"
@@ -593,12 +612,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="cfg-actions" style="align-items:center">
       <input type="password" id="ark-key" placeholder="ARK API Key（留空=不修改）" style="flex:2;min-width:180px;padding:5px 7px;border:1px solid #ccc;border-radius:6px;font-size:13px">
       <select id="ark-model-preset" onchange="pickModel(this.value)">
-        <option value="">常用模型…</option>
+        <option value="">常用模型…（点「刷新可用模型」拉全量）</option>
         <option value="doubao-seed-1-6-250615">doubao-seed-1.6（推荐）</option>
         <option value="doubao-1-5-pro-32k-250115">doubao-1.5-pro-32k</option>
         <option value="doubao-1-5-lite-32k-250115">doubao-1.5-lite-32k（便宜）</option>
         <option value="deepseek-v3-250324">deepseek-v3</option>
       </select>
+      <button class="sec" onclick="refreshModels()">↻ 刷新可用模型</button>
       <input type="text" id="ark-model" placeholder="模型名 或 接入点 ep-xxxx（可手填）" style="flex:2;min-width:200px;padding:5px 7px;border:1px solid #ccc;border-radius:6px;font-size:13px">
       <button onclick="saveArk()">💾 保存 AI 设置</button>
     </div>
@@ -731,6 +751,16 @@ async function loadConfig(){
   try{const k=await (await fetch('/api/keywords')).json();document.getElementById('kwtext').value=k.keywords||'';}catch(e){}
 }
 function pickModel(v){if(v){document.getElementById('ark-model').value=v;}}
+async function refreshModels(){
+  toast('正在用你的 Key 拉取可用模型…');
+  let d;
+  try{d=await (await fetch('/api/models')).json();}catch(e){alert('请求失败：'+e);return;}
+  if(d.error){alert(d.error);return;}
+  const sel=document.getElementById('ark-model-preset');
+  sel.innerHTML='<option value="">已刷新 '+d.models.length+' 个可用模型，选一个填到右侧框…</option>';
+  for(const m of d.models){const o=document.createElement('option');o.value=m;o.textContent=m;sel.appendChild(o);}
+  toast('已拉取 '+d.models.length+' 个模型');
+}
 async function saveArk(){
   const ark_key=document.getElementById('ark-key').value.trim();
   const ark_model=document.getElementById('ark-model').value.trim();
@@ -895,6 +925,11 @@ def run_serve(host, port):
                             "ark_model": c["ark_model"],
                             "ark_key_set": bool(key), "ark_key_env": bool(envkey),
                             "ark_key_hint": key[-4:] if len(key) >= 4 else ""})
+            elif path == "/api/models":
+                try:
+                    self._json({"models": list_ark_models()})
+                except Exception as e:
+                    self._json({"error": str(e)})
             else:
                 self._send(404, "text/plain; charset=utf-8", "not found")
 
