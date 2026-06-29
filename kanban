@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # 在项目文件夹里运行 ./kanban 启动看板（浏览器会自动打开）。
+# 国内网络：首次自动安装慢/失败，先 export JIELIU_CN=1 再运行；或先跑 python3 jieliu.py setup --cn。
 cd "$(dirname "$0")" || exit 1
 echo "正在启动截流看板... 浏览器将自动打开 http://127.0.0.1:8787（Ctrl+C 停止）"
 exec python3 jieliu.py serve "$@"

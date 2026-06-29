@@ -122,6 +122,24 @@ python3 jieliu.py serve
 - **最大的封号风险是「用错账号」**：平台能识别某账号正被自动化浏览器驱动，直接**账号级封禁**（手机端 + 电脑端同时失效）。所以**采集必须用专门的采集小号**（消耗品，被封就换），**绝不能用你真人/将来发评论触达客户的账号**去扫码。
 - 进一步降风险：`--max` 调小（如 3）、别短时间反复跑、`--get-comment false` 更轻；抖音比小红书风控更狠。
 
+## 国内网络环境（部署常见卡点）
+
+**运行时不受影响**：采集打的是抖音/小红书、AI 打的是火山方舟 `ark.cn-beijing.volces.com`，都是境内。
+**卡点全在「首次安装」的三个境外下载**，用国内镜像模式一条命令解决：
+
+```bash
+python jieliu.py setup --cn        # pip 走清华源；CDP 用系统 Chrome/Edge → 跳过 playwright chromium 下载
+```
+
+`--cn` 具体做了：
+- **pip 依赖** → 清华源 `pypi.tuna.tsinghua.edu.cn`（也可用 `JIELIU_PIP_INDEX=<源>` 换别的）；
+- **playwright chromium（~150MB，常被墙）** → **直接跳过**。CDP 模式用系统 **Chrome/Edge**（Windows 自带 Edge 即可，无需额外装浏览器）；
+- **GitHub 克隆**（唯一仍依赖 GitHub 的一步）：拉不动就二选一——
+  - `JIELIU_MC_REPO=<镜像/加速地址> python jieliu.py setup --cn`（指向 GitHub 镜像或加速）；
+  - 或手动下载 MediaCrawler 解压到 `vendor/MediaCrawler`（含 `main.py`），再跑 setup（会自动跳过克隆）。
+
+> 想让 `kanban` / `serve` 的**首次自动安装**也走镜像：先设环境变量 `JIELIU_CN=1`（Windows: `set JIELIU_CN=1`）再启动；或先手动 `python jieliu.py setup --cn` 装一次，之后 `kanban` 直接用。
+
 ## 在 Windows 上运行
 
 - **跑看板/采集/停止**：均已适配 Windows（venv 路径、停止采集用 `CTRL_BREAK` 触发抢救出链接）。一键启动用 `kanban`（或双击 `kanban.bat`）。

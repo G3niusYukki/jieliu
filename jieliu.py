@@ -96,16 +96,21 @@ def crawler_installed():
     return find_mediacrawler() is not None
 
 
-def run_setup():
+def run_setup(cn=False):
     """一次性安装采集器（纯 Python，跨平台，只需 git + python，无需 bash）。
 
-    步骤（幂等可重复跑）：clone MediaCrawler → 建独立 venv → 装依赖 →
-    应用 collectors/patches/*.patch → macOS 去隔离属性 → 自检 import。
+    cn=True 或环境变量 JIELIU_CN=1 → 国内镜像模式（pip 清华源 + 跳过 playwright chromium）。
+    可用环境变量覆盖：JIELIU_MC_REPO（clone 地址/镜像）、JIELIU_PIP_INDEX（pip 源）。
+    步骤（幂等可重复跑）：clone → 建独立 venv → 装依赖 → 应用补丁 → macOS 去隔离 → 自检。
     """
     import shutil
+    import urllib.parse
+    cn = cn or bool(os.environ.get("JIELIU_CN", "").strip())
     mc_home = Path(os.environ.get("MEDIACRAWLER_HOME") or (ROOT / "vendor" / "MediaCrawler"))
     patch_dir = ROOT / "collectors" / "patches"
-    repo = "https://github.com/NanmiCoder/MediaCrawler.git"
+    repo = os.environ.get("JIELIU_MC_REPO", "").strip() or "https://github.com/NanmiCoder/MediaCrawler.git"
+    pip_index = (os.environ.get("JIELIU_PIP_INDEX", "").strip()
+                 or ("https://pypi.tuna.tsinghua.edu.cn/simple" if cn else ""))
     is_win = os.name == "nt"
 
     def run(cmd, quiet=False, **kw):
@@ -113,18 +118,28 @@ def run_setup():
             print("   $ " + " ".join(str(c) for c in cmd))
         return subprocess.run(cmd, **kw)
 
+    def pip_idx():
+        if not pip_index:
+            return []
+        host = urllib.parse.urlparse(pip_index).hostname or ""
+        return ["-i", pip_index] + (["--trusted-host", host] if host else [])
+
     git = shutil.which("git")
     if not git:
         print("✗ 没找到 git。请先安装 Git（Windows: https://git-scm.com/download/win），再重试。")
         return 1
+    if cn:
+        print("▶ 国内镜像模式：pip 用清华源；CDP 用系统 Chrome/Edge（跳过 playwright chromium 下载）。")
     print(f"▶ 采集器目录: {mc_home}")
 
     # 1) clone（已存在则跳过）
     if not (mc_home / "main.py").exists():
-        print("▶ 克隆 MediaCrawler …")
+        print(f"▶ 克隆 MediaCrawler …（源：{repo}）")
         mc_home.parent.mkdir(parents=True, exist_ok=True)
         if run([git, "clone", "--depth", "1", repo, str(mc_home)]).returncode != 0:
-            print("✗ 克隆失败（检查网络 / git）。")
+            print("✗ 克隆失败。国内访问 GitHub 常受限，二选一：")
+            print("   ① 用镜像/加速地址：JIELIU_MC_REPO=<镜像地址> python jieliu.py setup --cn")
+            print("   ② 手动下载 MediaCrawler 解压到 vendor/MediaCrawler（含 main.py），再重跑（会自动跳过克隆）")
             return 1
     else:
         print("✓ 已存在 MediaCrawler，跳过克隆")
@@ -139,13 +154,15 @@ def run_setup():
         return 1
 
     # 3) 依赖
-    print("▶ 安装依赖（可能要几分钟）…")
-    run([str(vpy), "-m", "pip", "install", "-q", "--upgrade", "pip"])
+    print("▶ 安装依赖（可能要几分钟）…" + (f"  源：{pip_index}" if pip_index else ""))
+    run([str(vpy), "-m", "pip", "install", "-q", "--upgrade", "pip"] + pip_idx())
     req = mc_home / "requirements.txt"
-    if req.exists() and run([str(vpy), "-m", "pip", "install", "-q", "-r", str(req)]).returncode != 0:
-        print("✗ 依赖安装失败。")
+    if req.exists() and run([str(vpy), "-m", "pip", "install", "-q", "-r", str(req)] + pip_idx()).returncode != 0:
+        print("✗ 依赖安装失败。" + ("" if pip_index else " 国内可加清华源：python jieliu.py setup --cn"))
         return 1
-    if run([str(vpy), "-m", "playwright", "install", "chromium"]).returncode != 0:
+    if cn or os.environ.get("JIELIU_SKIP_PLAYWRIGHT", "").strip():
+        print("▶ 跳过 playwright chromium 下载（CDP 用系统 Chrome/Edge；Windows 自带 Edge 即可）。")
+    elif run([str(vpy), "-m", "playwright", "install", "chromium"]).returncode != 0:
         print("⚠ playwright chromium 未装（CDP 模式用系统 Chrome，不影响采集）")
 
     # 4) 应用补丁（git apply，幂等：已应用则跳过，版本漂移则告警不中断）
@@ -1174,6 +1191,8 @@ def main():
                     help="serve: 绑定地址；要给同局域网的运营访问就改成 0.0.0.0")
     ap.add_argument("--no-open", action="store_true", help="serve: 启动后不自动打开浏览器")
     ap.add_argument("--no-setup", action="store_true", help="serve: 首次不自动安装采集器")
+    ap.add_argument("--cn", action="store_true",
+                    help="setup: 国内镜像模式（pip 清华源 + 跳过 chromium 下载）")
     args = ap.parse_args()
 
     if args.selftest:
@@ -1183,7 +1202,7 @@ def main():
         print("✓ 已清空『已输出』记录，下次会重新给出旧链接。")
         return
     if args.command == "setup":
-        sys.exit(run_setup())
+        sys.exit(run_setup(cn=args.cn))
     if args.command == "serve":
         return run_serve(args.host, args.port, open_browser=not args.no_open,
                          auto_setup=not args.no_setup)
