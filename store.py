@@ -204,6 +204,45 @@ def get_queue(status="new", conn=None):
     return rows
 
 
+def get_followups(conn=None):
+    """跟进中的线索（已发出 status=posted），按漏斗阶段→分数排序，供回填可见性/回复/成交。"""
+    own = conn is None
+    conn = conn or connect()
+    order = ("CASE stage WHEN 'posted' THEN 0 WHEN 'replied' THEN 1 "
+             "WHEN 'added' THEN 2 WHEN 'quoted' THEN 3 WHEN 'deal' THEN 4 ELSE 5 END")
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM leads WHERE status='posted' ORDER BY {order}, score DESC")]
+    if own:
+        conn.close()
+    return rows
+
+
+def advance_stage(item_id, stage=None, deal_amount=None, account=None, note=None, conn=None):
+    """推进漏斗阶段（replied/added/quoted/deal）并打时间戳/成交额；stage 为空时只更新账号/成交等。"""
+    fields = {}
+    ts = now_str()
+    if stage:
+        fields["stage"] = stage
+        if stage == "replied":
+            fields["replied_at"] = ts
+        elif stage == "added":
+            fields["added_at"] = ts
+        elif stage == "deal":
+            fields["deal_at"] = ts
+    if deal_amount is not None:
+        fields["deal_amount"] = deal_amount
+    if account is not None:
+        fields["account"] = account
+    if note:
+        fields["note"] = note
+    return update_lead(item_id, conn=conn, **fields)
+
+
+def set_visibility(item_id, visible, conn=None):
+    """回填『评论对外是否可见』(yes/no)——把影子限流显性化。"""
+    return update_lead(item_id, visible=visible, visible_checked_at=now_str(), conn=conn)
+
+
 def get_lead(item_id, conn=None):
     own = conn is None
     conn = conn or connect()
