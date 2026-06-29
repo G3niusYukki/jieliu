@@ -634,6 +634,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
   <div class="bar" style="margin-top:8px">
     <button id="runbtn" onclick="runCrawl()">▶ 跑一次采集</button>
+    <button class="sec" id="stopbtn" onclick="stopCrawl()" disabled>■ 停止并出本次链接</button>
     <select id="r-plat"><option value="all">抖音+小红书</option><option value="xhs">仅小红书</option><option value="dy">仅抖音</option></select>
     每平台<input type="number" id="r-max" value="5" min="1" max="50" style="width:58px">帖
     每帖评论<input type="number" id="r-mc" value="20" min="0" max="100" style="width:58px">条
@@ -720,7 +721,7 @@ async function mark(l,done,tr){
 }
 async function loadLeads(){
   const r=await fetch('/api/leads');const d=await r.json();
-  LEADS=d.leads||[];document.getElementById('runbtn').disabled=d.running;render();
+  LEADS=d.leads||[];document.getElementById('runbtn').disabled=d.running;document.getElementById('stopbtn').disabled=!d.running;render();
   if(d.running)pollStatus();
 }
 async function runCrawl(){
@@ -729,14 +730,20 @@ async function runCrawl(){
   const d=await r.json();
   if(d.error){alert(d.error);return;}
   document.getElementById('runbox').style.display='block';
-  document.getElementById('runbtn').disabled=true;pollStatus();
+  document.getElementById('runbtn').disabled=true;document.getElementById('stopbtn').disabled=false;pollStatus();
+}
+async function stopCrawl(){
+  document.getElementById('stopbtn').disabled=true;
+  const d=await (await fetch('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  if(d.error){alert(d.error);document.getElementById('stopbtn').disabled=false;return;}
+  toast(d.msg||'已发送停止信号，正在出本次链接…');
 }
 async function pollStatus(){
   const r=await fetch('/api/run/status');const d=await r.json();
   const box=document.getElementById('runbox');box.style.display='block';
   document.getElementById('runlog').textContent=d.log||'(启动中…)';box.scrollTop=box.scrollHeight;
-  if(d.running){document.getElementById('runbtn').disabled=true;setTimeout(pollStatus,1500);}
-  else{document.getElementById('runbtn').disabled=false;if(d.returncode!=null)loadLeads();}
+  if(d.running){document.getElementById('runbtn').disabled=true;document.getElementById('stopbtn').disabled=false;setTimeout(pollStatus,1500);}
+  else{document.getElementById('runbtn').disabled=false;document.getElementById('stopbtn').disabled=true;if(d.returncode!=null)loadLeads();}
 }
 async function loadConfig(){
   try{const c=await (await fetch('/api/config')).json();
@@ -850,10 +857,11 @@ loadLeads();
 
 def run_serve(host, port):
     import http.server
+    import signal
     import threading
     import urllib.parse
 
-    state = {"running": False, "log": "", "returncode": None}
+    state = {"running": False, "log": "", "returncode": None, "proc": None}
     lock = threading.Lock()
 
     def do_crawl(params):
@@ -866,6 +874,7 @@ def run_serve(host, port):
         try:
             proc = subprocess.Popen(argv, cwd=str(ROOT), stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, bufsize=1)
+            state["proc"] = proc
             for line in proc.stdout:
                 state["log"] = (state["log"] + line)[-8000:]
             proc.wait()
@@ -877,6 +886,7 @@ def run_serve(host, port):
         finally:
             with lock:
                 state["running"] = False
+                state["proc"] = None
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -966,6 +976,16 @@ def run_serve(host, port):
                                  args=({"platform": plat, "max": mx,
                                         "max_comments": mc, "get_comment": gc},)).start()
                 self._json({"ok": True})
+            elif path == "/api/stop":
+                p = state.get("proc")
+                if state["running"] and p is not None and p.poll() is None:
+                    try:
+                        p.send_signal(signal.SIGINT)   # 等于程序化 Ctrl+C → 触发「用已采集数据出链接」
+                        self._json({"ok": True, "msg": "已发送停止信号，正在用已采集到的数据出链接…"})
+                    except Exception as e:
+                        self._json({"error": f"停止失败：{e}"})
+                else:
+                    self._json({"error": "当前没有正在运行的采集。"})
             elif path == "/api/keywords":
                 (ROOT / "keywords.txt").write_text(str(data.get("keywords", "")), encoding="utf-8")
                 self._json({"ok": True})
