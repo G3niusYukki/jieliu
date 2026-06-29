@@ -10,13 +10,16 @@
 ## 快速开始
 
 ```bash
+./run.sh crawl     # 接 MediaCrawler 采集抖音+小红书（需扫码登录你的账号）—— 已接通
 ./run.sh demo      # 用样例数据跑通打分，生成 data/queue.csv
 ./run.sh web       # 打开本地 Web 控制台（推荐）
 # 或
 ./run.sh publish   # 命令行版人工辅助发布
 ./run.sh report    # 复盘统计
-./run.sh test      # 自测（全绿即逻辑正常）
+./run.sh test      # 全部自测（核心 + 采集链路 + runner 管道）
 ```
+
+> 采集器安装一次即可，见 [collectors/README.md](collectors/README.md)。
 
 > 不用 `run.sh` 也行，直接 `python3 score.py` / `python3 serve.py` 等。
 
@@ -34,7 +37,9 @@
 | `report.py` | 复盘统计（按状态/平台/优先级，发布率） |
 | `selftest.py` | 自测：验证打分/去重/排除/冷却 |
 | `store.py` | 共享数据层（字段/读写/状态流转） |
-| `collectors/` | 采集层：MediaCrawler 适配器 + 说明 |
+| `collectors/run_mediacrawler.py` | **一键采集**：跑 MediaCrawler → 归一化进 leads.csv |
+| `collectors/mediacrawler_adapter.py` | 字段映射（对齐 MC 真实 schema）+ 热评合并进正文 |
+| `collectors/selftest_mc.py` / `selftest_runner.py` | 采集链路 / runner 管道自测 |
 | `data/` | `leads.csv`(输入) / `queue.csv`(待办) / `history.csv`(记录) |
 
 ## 每天怎么跑

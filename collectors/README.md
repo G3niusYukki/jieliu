@@ -1,38 +1,56 @@
-# 采集层（抖音 + 小红书）
+# 采集层（抖音 + 小红书）—— 已接通 MediaCrawler
 
-本目录负责「把公开内容采集进来」这一步，输出统一的 `../data/leads.csv`。
+本目录负责「把公开内容采集进来」，输出统一的 `../data/leads.csv`。
+采集器用 [MediaCrawler](https://github.com/NanmiCoder/MediaCrawler)（**同时支持抖音 xhs/dy**），
+字段映射、评论合并、一键 runner 都已对齐它的真实输出并测过。
 
-## 推荐方案：MediaCrawler
+## 一键采集
 
-[MediaCrawler](https://github.com/NanmiCoder/MediaCrawler) 是开源里最成熟的多平台采集器，
-**同时支持抖音和小红书**，基于 Playwright 保留登录态、用 JS 取签名，不用自己逆向加密。
+```bash
+./run.sh crawl                      # 抖音+小红书都采
+./run.sh crawl --platform xhs --max 15   # 只采小红书，最多 15 条
+```
 
-大致流程（具体命令以它的 README 为准，不同版本会变）：
+`run_mediacrawler.py` 会：用 `../keywords.txt` 当搜索词跑 MediaCrawler（json 输出 + 抓评论），
+找到最新的 contents/comments，调 `mediacrawler_adapter.py` 归一化进 `../data/leads.csv`，
+并把**热评摘进正文**（高价值意图「多少钱/怎么寄/清关麻烦吗」常只在评论里）。
 
-1. 单独 clone 并安装 MediaCrawler（独立于本项目）。
-2. 用本项目的 `../keywords.txt` 作为搜索词，按关键词搜索抓「笔记/视频 + 评论 + 点赞数」。
-3. 把结果导出成 CSV 或 JSON。
-4. 跑适配器归一化到 `data/leads.csv`：
+> **唯一手动一步**：MediaCrawler 起来后，用你自己的手机**扫码登录你自己的账号**
+> （`LOGIN_TYPE=qrcode`）。本项目不碰你的账号密码、不自动登录、不发布。
 
-   ```bash
-   python3 collectors/mediacrawler_adapter.py <导出文件> --platform xiaohongshu
-   python3 collectors/mediacrawler_adapter.py <导出文件> --platform douyin
-   ```
+## 安装 MediaCrawler（一次性）
 
-5. 回到项目根目录跑 `python3 score.py`。
+```bash
+# 1) clone 到 vendor/（已 gitignore）。也可放别处并设 MEDIACRAWLER_HOME 指向它
+git clone --depth 1 https://github.com/NanmiCoder/MediaCrawler.git vendor/MediaCrawler
 
-> 适配器只做字段映射。MediaCrawler 各版本导出字段名不一样，
-> 改 `mediacrawler_adapter.py` 顶部的 `FIELD_MAP` 即可对上。
+# 2) 装依赖（用独立 venv，别污染系统）
+cd vendor/MediaCrawler
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m playwright install chromium
+cd ../..
+```
 
-## 也可以先手动起步
+runner 会自动优先用 `vendor/MediaCrawler/.venv` 里的 Python。
 
-不想马上接采集器，可以人工搜关键词、把命中的帖子按 `../data/leads.sample.csv`
-的字段填进 `../data/leads.csv`，照样能跑通后面的去重 / 打分 / 排序 / 辅助发布。
-**高价值意图（“怎么寄/多少钱/清关麻烦吗”）经常在评论区**，填 `content_excerpt`
-时把热评也摘进去，打分会准很多。
+## 关于浏览器模式（CDP）
+
+MediaCrawler 默认 `ENABLE_CDP_MODE=True`（用真实 Chrome + 远程调试端口 9222，反检测更稳）。
+首次跑它会自动拉起一个 Chrome 并在端口 9222 调试；**保持非无头**（默认 `CDP_HEADLESS=False`）
+你才能看到并扫二维码。无需自己手动开 Chrome——它会自己拉起。
+
+> 已在本机实测：MediaCrawler 能正常启动、拉起浏览器并走到登录阶段；
+> 之后就是你扫码这一步。
+
+## 手动起步（不想马上装采集器）
+
+```bash
+python3 add_lead.py        # 交互式录入；把热评里的「多少钱/怎么寄」也摘进正文，打分更准
+```
 
 ## 合规边界（重要）
 
-- 只采集**公开**数据，控制频率，别碰个人隐私信息，遵守各平台 ToS。
-- 采集是为了**发现 + 人工跟进**，不是自动群发。
+- 只采集**公开**数据、控制频率、遵守各平台 ToS；用于发现 + 人工跟进。
+- 采集是为了发现，不是自动群发。
 - 本项目不提供、也不会加自动发布 / 多账号群控 / 绕风控的能力。

@@ -2,6 +2,10 @@
 data/*.csv
 !data/leads.sample.csv
 
+# 采集层：克隆的 MediaCrawler 与其输出不入库
+vendor/
+collectors/_mc_out/
+
 # Python
 __pycache__/
 *.pyc
