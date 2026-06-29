@@ -97,14 +97,87 @@ def crawler_installed():
 
 
 def run_setup():
-    """一次性安装采集器（clone + venv + 依赖 + 补丁）。Windows 需 bash（Git Bash / WSL）。"""
-    sh = ROOT / "collectors" / "setup_mediacrawler.sh"
-    try:
-        return subprocess.run(["bash", str(sh)]).returncode
-    except FileNotFoundError:
-        print("✗ 没找到 bash。Windows 请先装 Git for Windows 或 WSL，"
-              "再在 Git Bash 里跑：bash collectors/setup_mediacrawler.sh")
-        return 127
+    """一次性安装采集器（纯 Python，跨平台，只需 git + python，无需 bash）。
+
+    步骤（幂等可重复跑）：clone MediaCrawler → 建独立 venv → 装依赖 →
+    应用 collectors/patches/*.patch → macOS 去隔离属性 → 自检 import。
+    """
+    import shutil
+    mc_home = Path(os.environ.get("MEDIACRAWLER_HOME") or (ROOT / "vendor" / "MediaCrawler"))
+    patch_dir = ROOT / "collectors" / "patches"
+    repo = "https://github.com/NanmiCoder/MediaCrawler.git"
+    is_win = os.name == "nt"
+
+    def run(cmd, quiet=False, **kw):
+        if not quiet:
+            print("   $ " + " ".join(str(c) for c in cmd))
+        return subprocess.run(cmd, **kw)
+
+    git = shutil.which("git")
+    if not git:
+        print("✗ 没找到 git。请先安装 Git（Windows: https://git-scm.com/download/win），再重试。")
+        return 1
+    print(f"▶ 采集器目录: {mc_home}")
+
+    # 1) clone（已存在则跳过）
+    if not (mc_home / "main.py").exists():
+        print("▶ 克隆 MediaCrawler …")
+        mc_home.parent.mkdir(parents=True, exist_ok=True)
+        if run([git, "clone", "--depth", "1", repo, str(mc_home)]).returncode != 0:
+            print("✗ 克隆失败（检查网络 / git）。")
+            return 1
+    else:
+        print("✓ 已存在 MediaCrawler，跳过克隆")
+
+    # 2) venv（不存在才建）
+    vpy = mc_home / ".venv" / ("Scripts" if is_win else "bin") / ("python.exe" if is_win else "python")
+    if not vpy.exists():
+        print("▶ 创建独立 venv …")
+        run([sys.executable, "-m", "venv", str(mc_home / ".venv")])
+    if not vpy.exists():
+        print(f"✗ venv 创建失败：{vpy} 不存在（Linux 可能需先装 python3-venv）。")
+        return 1
+
+    # 3) 依赖
+    print("▶ 安装依赖（可能要几分钟）…")
+    run([str(vpy), "-m", "pip", "install", "-q", "--upgrade", "pip"])
+    req = mc_home / "requirements.txt"
+    if req.exists() and run([str(vpy), "-m", "pip", "install", "-q", "-r", str(req)]).returncode != 0:
+        print("✗ 依赖安装失败。")
+        return 1
+    if run([str(vpy), "-m", "playwright", "install", "chromium"]).returncode != 0:
+        print("⚠ playwright chromium 未装（CDP 模式用系统 Chrome，不影响采集）")
+
+    # 4) 应用补丁（git apply，幂等：已应用则跳过，版本漂移则告警不中断）
+    if patch_dir.is_dir():
+        print("▶ 应用补丁 …")
+        for patch in sorted(patch_dir.glob("*.patch")):
+            name = patch.name
+            if run([git, "-C", str(mc_home), "apply", "--reverse", "--check", str(patch)],
+                   quiet=True, capture_output=True).returncode == 0:
+                print(f"  ✓ 已应用，跳过: {name}")
+            elif run([git, "-C", str(mc_home), "apply", "--check", str(patch)],
+                     quiet=True, capture_output=True).returncode == 0:
+                run([git, "-C", str(mc_home), "apply", str(patch)], quiet=True)
+                print(f"  ✓ 应用成功: {name}")
+            else:
+                print(f"  ⚠ 应用失败（MediaCrawler 版本可能已变，需人工核对）: {name}")
+
+    # 5) macOS：去 .venv 隔离属性（否则 lxml 等原生库被系统策略拦）
+    if sys.platform == "darwin":
+        print("▶ macOS：清理 .venv 隔离属性 …")
+        run(["xattr", "-r", "-d", "com.apple.quarantine", str(mc_home / ".venv")],
+            quiet=True, stderr=subprocess.DEVNULL)
+
+    # 6) 自检 import
+    print("▶ 自检依赖 import …")
+    if run([str(vpy), "-c",
+            "import lxml.etree, playwright, httpx, parsel, execjs, xhshow; print('✓ 采集层依赖 OK')"]
+           ).returncode != 0:
+        print("⚠ 自检未通过（上面有依赖报错）；可先试用，采集报错再排查。")
+        return 1
+    print("\n✅ 采集器就绪。下一步：python jieliu.py serve（或直接 kanban）")
+    return 0
 
 
 def read_keywords():

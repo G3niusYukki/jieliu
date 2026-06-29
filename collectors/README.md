@@ -6,12 +6,13 @@
 ## 一键安装
 
 ```bash
-python3 jieliu.py setup        # 等价于直接跑 ./collectors/setup_mediacrawler.sh
+python3 jieliu.py setup        # 纯 Python、跨平台（Windows 也行，无需 bash）；只需 git + Python
 ```
 
-`setup_mediacrawler.sh`（幂等，可重复跑）会：clone MediaCrawler 到 `../vendor/`（已 gitignore）
-→ 建独立 venv 装依赖 → **应用 `patches/` 里的补丁** → macOS 下清掉 `.venv` 隔离属性 → 自检 import。
-也可 `MEDIACRAWLER_HOME=/path/to/MediaCrawler ./collectors/setup_mediacrawler.sh` 指向别处。
+`jieliu.py setup`（幂等，可重复跑）会：clone MediaCrawler 到 `../vendor/`（已 gitignore）
+→ 建独立 venv 装依赖 → **应用 `patches/` 里的补丁**（git apply）→ macOS 下清掉 `.venv` 隔离属性 → 自检 import。
+`setup_mediacrawler.sh` 是等价的 **bash 版（Unix 备选）**，内容一致；默认/Windows 都走 `python3 jieliu.py setup`。
+也可 `MEDIACRAWLER_HOME=/path/to/MediaCrawler python3 jieliu.py setup` 指向别处。
 
 ## 为什么需要补丁（`patches/`）
 
