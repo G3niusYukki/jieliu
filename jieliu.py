@@ -327,21 +327,27 @@ def collect_and_score(platforms, do_crawl, max_notes, get_comment, max_comments,
         print("⚠ 扫码请用【专门的小号】，别用你发评论触达客户的账号。")
 
     all_leads = []
+    interrupted = False
     for plat in platforms:
         since = None
         if do_crawl:
             t0 = time.time()
-            rc = run_platform(mc_home, py, plat, read_keywords(), max_notes, get_comment, max_comments)
+            try:
+                run_platform(mc_home, py, plat, read_keywords(), max_notes, get_comment, max_comments)
+            except KeyboardInterrupt:
+                interrupted = True          # 中断了也要把已抓到的数据用上，绝不浪费
             since = t0
         contents = newest(plat, "contents", since=since)
         comments = newest(plat, "comments", since=since) if get_comment else None
-        if not contents:
-            if do_crawl:
-                print(f"  {plat}: ⚠ 没抓到本次数据（可能被风控/中断/无结果，或登录小号被限）")
-            else:
-                print(f"  {plat}: 没有可用的历史采集数据，先不带 --no-crawl 跑一次")
-            continue
-        all_leads += normalize(contents, comments, plat, intent_words)
+        if contents:
+            all_leads += normalize(contents, comments, plat, intent_words)
+        elif do_crawl:
+            print(f"  {plat}: ⚠ 没抓到本次数据（可能被风控/中断/无结果，或登录小号被限）")
+        else:
+            print(f"  {plat}: 没有可用的历史采集数据，先不带 --no-crawl 跑一次")
+        if interrupted:
+            print("\n⚠ 你中断了采集——下面直接用【已抓到的数据】出链接，不让你白跑。")
+            break
 
     scored = []
     for lead in all_leads:
@@ -475,5 +481,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n中断退出。")
+        print("\n已中断。已抓到的数据还在，跑 `python3 jieliu.py --no-crawl` 即可把它捞成链接。")
         sys.exit(0)
