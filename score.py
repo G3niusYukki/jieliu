@@ -153,6 +153,10 @@ def score_lead(lead, cfg, now):
     if match_terms(text, cfg.get("negative_signals", [])):
         score -= sc.get("negative_signal_penalty", 40)
 
+    # 5.6) 海外属地：发帖人在海外 = 高度疑似「海运回国」真买家（最廉价的买家判别特征）
+    if match_terms(lead.get("ip_location", ""), cfg.get("overseas_regions", [])):
+        score += sc.get("overseas_bonus", 0)
+
     # 6) 优先级分桶
     cut = sc["priority_cut"]
     if score >= cut["high"]:
