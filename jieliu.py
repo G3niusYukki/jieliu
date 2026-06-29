@@ -92,6 +92,21 @@ def mc_python(mc_home):
     return sys.executable
 
 
+def crawler_installed():
+    return find_mediacrawler() is not None
+
+
+def run_setup():
+    """一次性安装采集器（clone + venv + 依赖 + 补丁）。Windows 需 bash（Git Bash / WSL）。"""
+    sh = ROOT / "collectors" / "setup_mediacrawler.sh"
+    try:
+        return subprocess.run(["bash", str(sh)]).returncode
+    except FileNotFoundError:
+        print("✗ 没找到 bash。Windows 请先装 Git for Windows 或 WSL，"
+              "再在 Git Bash 里跑：bash collectors/setup_mediacrawler.sh")
+        return 127
+
+
 def read_keywords():
     kw = []
     for line in (ROOT / "keywords.txt").read_text(encoding="utf-8").splitlines():
@@ -857,10 +872,19 @@ loadLeads();
 """
 
 
-def run_serve(host, port, open_browser=True):
+def run_serve(host, port, open_browser=True, auto_setup=True):
     import http.server
     import threading
     import urllib.parse
+
+    if auto_setup and not crawler_installed():
+        print("⚠ 还没装采集器，正在自动安装（仅首次，可能要几分钟）…")
+        run_setup()
+        if crawler_installed():
+            print("✓ 采集器已就绪。")
+        else:
+            print("⚠ 采集器未装好；看板照常可用（看/筛/标记/导出/AI），"
+                  "但『跑一次采集』要等装好后才行（见 README『在 Windows 上运行』）。")
 
     state = {"running": False, "log": "", "returncode": None, "proc": None}
     lock = threading.Lock()
@@ -1076,6 +1100,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1",
                     help="serve: 绑定地址；要给同局域网的运营访问就改成 0.0.0.0")
     ap.add_argument("--no-open", action="store_true", help="serve: 启动后不自动打开浏览器")
+    ap.add_argument("--no-setup", action="store_true", help="serve: 首次不自动安装采集器")
     args = ap.parse_args()
 
     if args.selftest:
@@ -1085,10 +1110,10 @@ def main():
         print("✓ 已清空『已输出』记录，下次会重新给出旧链接。")
         return
     if args.command == "setup":
-        sh = ROOT / "collectors" / "setup_mediacrawler.sh"
-        sys.exit(subprocess.run(["bash", str(sh)]).returncode)
+        sys.exit(run_setup())
     if args.command == "serve":
-        return run_serve(args.host, args.port, open_browser=not args.no_open)
+        return run_serve(args.host, args.port, open_browser=not args.no_open,
+                         auto_setup=not args.no_setup)
 
     platforms = ["xhs", "dy"] if args.platform == "all" else [args.platform]
     scored = collect_and_score(platforms, not args.no_crawl, args.max,
