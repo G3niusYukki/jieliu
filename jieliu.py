@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -84,7 +85,8 @@ def find_mediacrawler():
 
 
 def mc_python(mc_home):
-    for p in [mc_home / ".venv" / "bin" / "python", mc_home / "venv" / "bin" / "python"]:
+    for p in [mc_home / ".venv" / "bin" / "python", mc_home / "venv" / "bin" / "python",
+              mc_home / ".venv" / "Scripts" / "python.exe", mc_home / "venv" / "Scripts" / "python.exe"]:
         if p.exists():
             return str(p)
     return sys.executable
@@ -855,9 +857,8 @@ loadLeads();
 """
 
 
-def run_serve(host, port):
+def run_serve(host, port, open_browser=True):
     import http.server
-    import signal
     import threading
     import urllib.parse
 
@@ -872,8 +873,11 @@ def run_serve(host, port):
         state["log"] = ("▶ 启动采集： " + " ".join(argv[3:]) +
                         "\n（首次会弹出浏览器扫码——务必用专门小号）\n\n")
         try:
+            kw = {}
+            if os.name == "nt":     # Windows：独立进程组，便于停止时定向发 CTRL_BREAK
+                kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             proc = subprocess.Popen(argv, cwd=str(ROOT), stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1, **kw)
             state["proc"] = proc
             for line in proc.stdout:
                 state["log"] = (state["log"] + line)[-8000:]
@@ -980,7 +984,8 @@ def run_serve(host, port):
                 p = state.get("proc")
                 if state["running"] and p is not None and p.poll() is None:
                     try:
-                        p.send_signal(signal.SIGINT)   # 等于程序化 Ctrl+C → 触发「用已采集数据出链接」
+                        sig = signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT
+                        p.send_signal(sig)             # 等于程序化 Ctrl+C → 触发「用已采集数据出链接」
                         self._json({"ok": True, "msg": "已发送停止信号，正在用已采集到的数据出链接…"})
                     except Exception as e:
                         self._json({"error": f"停止失败：{e}"})
@@ -1041,6 +1046,12 @@ def run_serve(host, port):
         print("⚠ 绑定 0.0.0.0：同一局域网都能访问，且【无登录验证】。仅在可信内网这么开，别暴露公网。")
     print("运营在网页上即可：看/筛/点链接、标记『已截流』、跑一次采集、导出当前列表、改关键词。")
     print("（Ctrl+C 停止看板）")
+    if open_browser and host != "0.0.0.0":
+        try:
+            import webbrowser
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        except Exception:
+            pass
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -1064,6 +1075,7 @@ def main():
     ap.add_argument("--port", type=int, default=8787, help="serve: 看板端口（默认 8787）")
     ap.add_argument("--host", default="127.0.0.1",
                     help="serve: 绑定地址；要给同局域网的运营访问就改成 0.0.0.0")
+    ap.add_argument("--no-open", action="store_true", help="serve: 启动后不自动打开浏览器")
     args = ap.parse_args()
 
     if args.selftest:
@@ -1076,7 +1088,7 @@ def main():
         sh = ROOT / "collectors" / "setup_mediacrawler.sh"
         sys.exit(subprocess.run(["bash", str(sh)]).returncode)
     if args.command == "serve":
-        return run_serve(args.host, args.port)
+        return run_serve(args.host, args.port, open_browser=not args.no_open)
 
     platforms = ["xhs", "dy"] if args.platform == "all" else [args.platform]
     scored = collect_and_score(platforms, not args.no_crawl, args.max,
@@ -1173,6 +1185,11 @@ def run_selftest():
 
 
 if __name__ == "__main__":
+    if os.name == "nt" and hasattr(signal, "SIGBREAK"):
+        try:    # Windows：让看板「停止采集」发来的 CTRL_BREAK 触发 KeyboardInterrupt → 走抢救出链接
+            signal.signal(signal.SIGBREAK, signal.default_int_handler)
+        except (ValueError, OSError):
+            pass
     try:
         main()
     except KeyboardInterrupt:
