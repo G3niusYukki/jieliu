@@ -134,9 +134,9 @@ python jieliu.py setup --cn        # pip 走清华源；CDP 用系统 Chrome/Edg
 `--cn` 具体做了：
 - **pip 依赖** → 清华源 `pypi.tuna.tsinghua.edu.cn`（也可用 `JIELIU_PIP_INDEX=<源>` 换别的）；
 - **playwright chromium（~150MB，常被墙）** → **直接跳过**。CDP 模式用系统 **Chrome/Edge**（Windows 自带 Edge 即可，无需额外装浏览器）；
-- **GitHub 克隆**（唯一仍依赖 GitHub 的一步）：拉不动就二选一——
-  - `JIELIU_MC_REPO=<镜像/加速地址> python jieliu.py setup --cn`（指向 GitHub 镜像或加速）；
-  - 或手动下载 MediaCrawler 解压到 `vendor/MediaCrawler`（含 `main.py`），再跑 setup（会自动跳过克隆）。
+- **GitHub 克隆** → `--cn` 会**自动按「加速镜像 → 直连」顺序重试**（内置 `gh-proxy.com` / `ghfast.top` / `ghproxy.net`，均已实测可代理 git，哪个通用哪个）。万一都不通：
+  - 指定你能访问的镜像：`JIELIU_MC_REPO=<地址> python jieliu.py setup --cn`；
+  - 或手动下载 MediaCrawler 解压到 `vendor/MediaCrawler`（含 `main.py`），再跑 setup（自动跳过克隆）。
 
 > 想让 `kanban` / `serve` 的**首次自动安装**也走镜像：先设环境变量 `JIELIU_CN=1`（Windows: `set JIELIU_CN=1`）再启动；或先手动 `python jieliu.py setup --cn` 装一次，之后 `kanban` 直接用。
 

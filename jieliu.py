@@ -108,7 +108,15 @@ def run_setup(cn=False):
     cn = cn or bool(os.environ.get("JIELIU_CN", "").strip())
     mc_home = Path(os.environ.get("MEDIACRAWLER_HOME") or (ROOT / "vendor" / "MediaCrawler"))
     patch_dir = ROOT / "collectors" / "patches"
-    repo = os.environ.get("JIELIU_MC_REPO", "").strip() or "https://github.com/NanmiCoder/MediaCrawler.git"
+    _mc_override = os.environ.get("JIELIU_MC_REPO", "").strip()
+    _gh = _mc_override or "https://github.com/NanmiCoder/MediaCrawler.git"
+    if _mc_override:                # 用户指定了镜像就只用它
+        repo_candidates = [_gh]
+    elif cn:                        # 国内：先试加速镜像（已实测可用），最后兜底直连
+        repo_candidates = [f"https://{m}/{_gh}" for m in
+                           ("gh-proxy.com", "ghfast.top", "ghproxy.net")] + [_gh]
+    else:
+        repo_candidates = [_gh]
     pip_index = (os.environ.get("JIELIU_PIP_INDEX", "").strip()
                  or ("https://pypi.tuna.tsinghua.edu.cn/simple" if cn else ""))
     is_win = os.name == "nt"
@@ -132,14 +140,23 @@ def run_setup(cn=False):
         print("▶ 国内镜像模式：pip 用清华源；CDP 用系统 Chrome/Edge（跳过 playwright chromium 下载）。")
     print(f"▶ 采集器目录: {mc_home}")
 
-    # 1) clone（已存在则跳过）
+    # 1) clone（已存在则跳过；国内按 镜像→直连 顺序自动重试）
     if not (mc_home / "main.py").exists():
-        print(f"▶ 克隆 MediaCrawler …（源：{repo}）")
         mc_home.parent.mkdir(parents=True, exist_ok=True)
-        if run([git, "clone", "--depth", "1", repo, str(mc_home)]).returncode != 0:
-            print("✗ 克隆失败。国内访问 GitHub 常受限，二选一：")
-            print("   ① 用镜像/加速地址：JIELIU_MC_REPO=<镜像地址> python jieliu.py setup --cn")
-            print("   ② 手动下载 MediaCrawler 解压到 vendor/MediaCrawler（含 main.py），再重跑（会自动跳过克隆）")
+        cloned = False
+        for i, url in enumerate(repo_candidates, 1):
+            print(f"▶ 克隆 MediaCrawler …（源 {i}/{len(repo_candidates)}：{url}）")
+            ok = run([git, "clone", "--depth", "1", url, str(mc_home)]).returncode == 0
+            if ok and (mc_home / "main.py").exists():
+                cloned = True
+                break
+            print("  ✗ 该源失败，换下一个…")
+            if mc_home.exists() and not (mc_home / "main.py").exists():
+                shutil.rmtree(mc_home, ignore_errors=True)   # 清掉半成品目录
+        if not cloned:
+            print("✗ 所有源都没拉下来。两种兜底：")
+            print("   ① 指定你能访问的镜像：JIELIU_MC_REPO=<地址> python jieliu.py setup --cn")
+            print("   ② 手动下载 MediaCrawler 解压到 vendor/MediaCrawler（含 main.py），再重跑（自动跳过克隆）")
             return 1
     else:
         print("✓ 已存在 MediaCrawler，跳过克隆")
