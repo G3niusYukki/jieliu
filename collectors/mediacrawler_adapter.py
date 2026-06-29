@@ -32,7 +32,8 @@ LEADS = ROOT / "data" / "leads.csv"
 
 LEADS_FIELDS = ["platform", "content_id", "url", "title", "author_id",
                 "author_name", "content_excerpt", "ip_location", "publish_time",
-                "likes", "comments_count", "crawl_time"]
+                "likes", "comments_count", "crawl_time",
+                "lead_type", "parent_content_id", "comment_id", "target"]
 
 # 落盘前脱敏：只抹「真实联系方式」(手机号/微信号/QQ/邮箱)，保留"电话/微信"等意图上下文词。
 # 目的：PIPL/刑事红线——成规模存储敏感个人信息会把入罪门槛从一般信息5000条降到敏感信息50条。
@@ -74,6 +75,57 @@ CONTENT_MAP = {
 COMMENT_KEY = ["note_id", "aweme_id"]      # 评论挂到哪条内容
 COMMENT_TEXT = ["content"]
 COMMENT_LIKE = ["like_count"]
+COMMENT_ID = ["comment_id"]
+COMMENT_USER = ["user_id"]
+COMMENT_NICK = ["nickname"]
+COMMENT_IP = ["ip_location"]
+COMMENT_TIME = ["create_time", "time"]
+
+
+def load_intent_words():
+    """读 config.json 的意图词（强+弱），用于把『在评论区问价』的人识别成可触达线索。"""
+    try:
+        cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+        return (cfg.get("intent_strong", []) + cfg.get("intent_weak", [])) or cfg.get("intent_signals", [])
+    except Exception:
+        return []
+
+
+def emit_commenter_leads(comments, note_index, platform, now):
+    """把命中意图词(在评论区问价/问怎么寄)的评论者，抽成可【直接回复该评论者】的独立线索。"""
+    intent = load_intent_words()
+    out = []
+    for c in comments:
+        note_id = pick(c, COMMENT_KEY)
+        text = scrub(pick(c, COMMENT_TEXT))
+        if not (note_id and text):
+            continue
+        if not any(w and w in text for w in intent):     # 只抽有购买意图的评论者
+            continue
+        note = note_index.get(note_id, {})
+        note_title = note.get("title", "")
+        nick = pick(c, COMMENT_NICK) or "网友"
+        cmt_id = pick(c, COMMENT_ID) or f"{note_id}_{pick(c, COMMENT_USER)}"
+        out.append({
+            "platform": platform,
+            "content_id": cmt_id,                          # 评论 id 作主键，与帖子线索独立去重
+            "url": note.get("url", ""),                    # 打开这条帖子去定位/回复该评论
+            "title": f"评论@{nick}：{text[:24]}",
+            "author_id": pick(c, COMMENT_USER),
+            "author_name": nick,
+            # 折进原帖标题，让评论者线索继承物流品类上下文(否则纯意图无品类词会被打分丢弃)
+            "content_excerpt": f"{text}｜原帖:{note_title}",
+            "ip_location": pick(c, COMMENT_IP),
+            "publish_time": normalize_time(pick(c, COMMENT_TIME)),
+            "likes": pick(c, COMMENT_LIKE),
+            "comments_count": "",
+            "crawl_time": now,
+            "lead_type": "commenter",
+            "parent_content_id": note_id,
+            "comment_id": cmt_id,
+            "target": f"回复 @{nick}：{text}",
+        })
+    return out
 
 
 def pick(row, candidates, default=""):
@@ -158,18 +210,23 @@ def main():
     ap.add_argument("--platform", default="", help="xhs / dy（源文件/路径推断不出时用）")
     ap.add_argument("--mode", choices=["append", "overwrite"], default="append")
     ap.add_argument("--top-comments", type=int, default=8)
+    ap.add_argument("--emit-commenter-leads", action="store_true",
+                    help="把评论区里『问价/问怎么寄』的评论者抽成可直接回复的独立线索(lead_type=commenter)")
     args = ap.parse_args()
 
     platform = infer_platform(args.source, args.platform)
     contents = load_records(args.source)
-    cindex = build_comment_index(load_records(args.comments), args.top_comments) if args.comments else {}
+    comments_raw = load_records(args.comments) if args.comments else []
+    cindex = build_comment_index(comments_raw, args.top_comments) if comments_raw else {}
 
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     out, merged_comments = [], 0
+    note_index = {}
     for row in contents:
         rec = {k: pick(row, v) for k, v in CONTENT_MAP.items()}
         if not rec["content_id"]:
             continue
+        rec["lead_type"] = "note"
         rec["platform"] = platform or PLATFORM_CODE.get(pick(row, ["platform", "source"]), "")
         rec["publish_time"] = normalize_time(rec["publish_time"])
         # 正文/标题落盘前脱敏（评论文本已在 build_comment_index 里脱敏）
@@ -182,7 +239,15 @@ def main():
                                       " / ".join(cmts)).strip()
             merged_comments += len(cmts)
         rec["crawl_time"] = now
+        note_index[rec["content_id"]] = {"url": rec.get("url", ""), "title": rec.get("title", "")}
         out.append({k: rec.get(k, "") for k in LEADS_FIELDS})
+
+    note_n = len(out)
+    commenter_n = 0
+    if args.emit_commenter_leads and comments_raw:
+        cleads = emit_commenter_leads(comments_raw, note_index, platform, now)
+        out.extend({k: r.get(k, "") for k in LEADS_FIELDS} for r in cleads)
+        commenter_n = len(cleads)
 
     LEADS.parent.mkdir(parents=True, exist_ok=True)
     write_header = args.mode == "overwrite" or not LEADS.exists()
@@ -192,8 +257,9 @@ def main():
             w.writeheader()
         w.writerows(out)
 
-    print(f"归一化 {len(out)} 条内容（平台={platform or '未知'}），"
-          f"合并热评 {merged_comments} 条 -> {LEADS}（mode={args.mode}）")
+    print(f"归一化 {note_n} 条内容（平台={platform or '未知'}），合并热评 {merged_comments} 条"
+          + (f"，抽出评论者线索 {commenter_n} 条" if args.emit_commenter_leads else "")
+          + f" -> {LEADS}（mode={args.mode}）")
     print("接着回项目根目录跑：python3 score.py")
 
 

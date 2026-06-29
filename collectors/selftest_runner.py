@@ -101,7 +101,10 @@ def main():
         subprocess.run([sys.executable, str(ROOT / "score.py")], check=True, cwd=str(ROOT))
         q = list(csv.DictReader(open(queue, encoding="utf-8")))
         check("score 生成非空队列", len(q) > 0)
-        check("两条都进队列且均 high", len(q) == 2 and all(r["priority"] == "high" for r in q))
+        # 现在 ingest 默认抽评论者线索：2 条帖 + 2 条评论者，均 high
+        check("帖+评论者都进队列且均 high", len(q) == 4 and all(r["priority"] == "high" for r in q))
+        check("评论者线索已抽出(lead_type=commenter)", any(r.get("lead_type") == "commenter" for r in q))
+        check("评论者线索带回复目标(target)", any(r.get("lead_type") == "commenter" and r.get("target") for r in q))
     finally:
         # 还原临时 OUT_DIR 与真实数据，保持你的采集缓存/线索原样
         runner.OUT_DIR = orig_out

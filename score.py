@@ -52,6 +52,12 @@ def load_comment_templates():
         return json.load(f)["templates"]
 
 
+def load_reply_templates():
+    """承接式话术：用于直接回复评论区买家（lead_type=commenter），口吻不同于帖子顶评。"""
+    with open(ROOT / "comments.json", encoding="utf-8") as f:
+        return json.load(f).get("reply_templates", [])
+
+
 def read_csv(path):
     p = ROOT / path
     if not p.exists():
@@ -135,6 +141,9 @@ def score_lead(lead, cfg, now):
     intent_hits = strong + weak
     intent_score = (len(strong) * sc.get("intent_strong_each", 30)
                     + len(weak) * sc.get("intent_weak_each", 15))
+    # 评论者线索：意图就发生在评论里，权重更高（评论区问价的人=最直接的买家）
+    if lead.get("lead_type") == "commenter":
+        intent_score *= sc.get("comment_intent_multiplier", 1.5)
     score += min(intent_score, sc["intent_cap"])
 
     # 4) 时效加分（越新越好）
@@ -168,7 +177,7 @@ def score_lead(lead, cfg, now):
     else:
         priority = "low"
 
-    return score, priority, matched, intent_hits
+    return int(round(score)), priority, matched, intent_hits
 
 
 def build_dedup_index(history, cooldown_days, now):
@@ -189,6 +198,7 @@ def main():
     cfg = load_config()
     validate_config(cfg)
     templates = load_comment_templates()
+    reply_templates = load_reply_templates()
     now = datetime.now()
     now_s = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -228,19 +238,24 @@ def main():
         score, priority, matched, intent_hits = scored
         batch_ids.add(cid)
 
+        ltype = lead.get("lead_type") or "note"
+        pool = reply_templates if (ltype == "commenter" and reply_templates) else templates
         row = {
             "id": f"{lead.get('platform','')}-{cid}",
-            "lead_type": "note",
+            "lead_type": ltype,
             "platform": lead.get("platform", ""),
             "content_id": cid, "url": url,
             "title": lead.get("title", ""),
             "author_id": author,
             "author_name": lead.get("author_name", ""),
             "ip_location": lead.get("ip_location", ""),
+            "parent_content_id": lead.get("parent_content_id", ""),
+            "comment_id": lead.get("comment_id", ""),
+            "target": lead.get("target", ""),
             "matched_keywords": "|".join(matched),
             "intent_hits": "|".join(intent_hits),
             "priority": priority, "score": score,
-            "comment_text": pick_template(cid, templates, priority),
+            "comment_text": pick_template(cid, pool, priority),
             "status": "new", "stage": "new", "created_at": now_s,
         }
         # upsert：新线索入库为 new；已存在的只刷新分数/内容，保留其生命周期与已改写的草稿

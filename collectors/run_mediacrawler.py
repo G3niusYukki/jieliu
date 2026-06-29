@@ -92,18 +92,21 @@ def count_records(path):
         return -1
 
 
-def run_platform(mc_home, py, platform, keywords, max_notes):
+def run_platform(mc_home, py, platform, keywords, max_notes, get_comment=True, max_comments=20):
     print(f"\n{'='*60}\n▶ 采集 {platform}  （扫码登录你自己的账号；抓公开数据）\n{'='*60}")
     cmd = [py, "main.py",
            "--platform", platform,
            "--lt", "qrcode",
            "--type", "search",
            "--keywords", keywords,
-           "--get_comment", "true",
+           "--get_comment", "true" if get_comment else "false",
            "--save_data_option", "json",
            "--save_data_path", str(OUT_DIR),
            "--crawler_max_notes_count", str(max_notes),
            "--headless", "false"]
+    # 评论是请求量最大、最易触发限流的环节：可关(get_comment=false)做轻量采集，或限 Top-N 降风控
+    if get_comment:
+        cmd += ["--max_comments_count_singlenotes", str(max_comments)]
     # 继承 stdio：扫码登录是交互式的，必须让你看到二维码/提示
     r = subprocess.run(cmd, cwd=str(mc_home))
     if r.returncode != 0:
@@ -124,7 +127,7 @@ def ingest(platform, mode, since=None):
         return 0
     args = [sys.executable, str(ADAPTER), str(contents), "--platform", platform, "--mode", mode]
     if comments:
-        args += ["--comments", str(comments)]
+        args += ["--comments", str(comments), "--emit-commenter-leads"]
     print(f"→ 归一化 {platform}：{contents.name}" + (f" + {comments.name}" if comments else " （无评论文件）"))
     subprocess.run(args, check=True)
     return n if n > 0 else 1
@@ -166,6 +169,10 @@ def main():
                     help="overwrite=当天重抓覆盖 leads.csv（默认）；append=追加")
     ap.add_argument("--account-label", default="",
                     help="本次采集所用账号的标签，仅记进 collect_log 便于审计『采集号/触达号』隔离")
+    ap.add_argument("--get-comment", choices=["true", "false"], default="true",
+                    help="是否抓评论(默认 true)。评论请求量最大、最易触发限流；轻量低风险采集可设 false")
+    ap.add_argument("--max-comments", type=int, default=20,
+                    help="每帖最多抓多少条一级评论(默认 20)；调小降请求量与封控风险")
     args = ap.parse_args()
 
     mc_home = find_mediacrawler()
@@ -184,7 +191,8 @@ def main():
     results = []
     for plat in platforms:
         t0 = time.time()
-        rc = run_platform(mc_home, py, plat, keywords, args.max)
+        rc = run_platform(mc_home, py, plat, keywords, args.max,
+                          get_comment=(args.get_comment == "true"), max_comments=args.max_comments)
         n = ingest(plat, mode, since=t0)          # since=t0：只认本次新产出，杜绝旧数据回灌
         v = verdict_of(rc, n)
         log_collect(plat, keywords, args.account_label, rc, n, v)

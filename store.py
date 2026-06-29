@@ -25,14 +25,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 
 # 队列/快照字段（queue.csv 仍按这个，向后兼容 inspect 与历史脚本）
-QUEUE_FIELDS = ["id", "platform", "content_id", "url", "title", "author_id",
-                "author_name", "matched_keywords", "intent_hits", "priority",
+QUEUE_FIELDS = ["id", "lead_type", "platform", "content_id", "url", "title", "author_id",
+                "author_name", "target", "matched_keywords", "intent_hits", "priority",
                 "score", "status", "comment_text", "created_at", "processed_at", "note"]
 
 # 采集层产出的原始线索字段
 LEADS_FIELDS = ["platform", "content_id", "url", "title", "author_id",
                 "author_name", "content_excerpt", "ip_location", "publish_time",
-                "likes", "comments_count", "crawl_time"]
+                "likes", "comments_count", "crawl_time",
+                "lead_type", "parent_content_id", "comment_id", "target"]
 
 VALID_STATUS = {"new", "opened", "posted", "skipped", "failed"}
 
