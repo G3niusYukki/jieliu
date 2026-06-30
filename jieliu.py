@@ -48,9 +48,25 @@ PLATFORM_CODE = {"xhs": "xiaohongshu", "dy": "douyin",
 
 # ----------------------------- 配置 -----------------------------
 
-def load_config():
+def load_config(merge_business=True):
+    """打分配置。merge_business=True 时叠加业务自定义筛选规则（AI 生成、存 aiconfig.json）
+    和用户搜索词（keywords.txt）作相关性兜底，使『改了类目』立即生效，不再写死物流。"""
     with open(ROOT / "config.json", encoding="utf-8") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    if not merge_business:
+        return cfg
+    flt = load_aiconfig().get("filters") or {}
+    for k in ("keyword_tiers", "intent_strong", "intent_weak",
+              "seller_author_words", "negative_topic_words"):
+        if flt.get(k):
+            cfg[k] = flt[k]                       # 业务规则覆盖默认（物流）配置
+    if flt.get("use_overseas_bonus") is False:
+        cfg.setdefault("scoring", {})["overseas_bonus"] = 0
+    try:                                          # keywords.txt 里的搜索词 = 该类目的相关性词
+        cfg["user_keywords"] = [w for w in read_keywords().split(",") if w]
+    except Exception:
+        cfg["user_keywords"] = []
+    return cfg
 
 
 # ----------------------------- 脱敏（PIPL：抹真实联系方式，留意图词） -----------------------------
@@ -365,9 +381,10 @@ def score_lead(lead, cfg, now):
 
     tiers = cfg["keyword_tiers"]
     hi, mid, low = _hits(text, tiers["high"]), _hits(text, tiers["mid"]), _hits(text, tiers["low"])
-    top = "high" if hi else "mid" if mid else "low" if low else None
+    ukw = _hits(text, cfg.get("user_keywords", []))   # 命中用户自己搜的词也算相关（按类目走）
+    top = "high" if hi else "mid" if mid else "low" if (low or ukw) else None
     if not top:
-        return None                                   # 没命中任何物流词
+        return None                                   # 既不命中分级词、也不含用户搜索词 → 与本类目无关
 
     sc = cfg["scoring"]
     score = sc["tier_base"][top]
@@ -548,7 +565,8 @@ def load_aiconfig():
             d = {}
     return {"business": d.get("business", ""), "templates": d.get("templates", ""),
             "ark_key": d.get("ark_key", ""), "ark_model": d.get("ark_model", ""),
-            "ark_base_url": d.get("ark_base_url", "")}
+            "ark_base_url": d.get("ark_base_url", ""),
+            "filters": d.get("filters") or {}}
 
 
 def save_aiconfig(updates):
@@ -622,9 +640,10 @@ def list_ark_models():
 
 _KW_SYSTEM = (
     "你是中文社媒获客的关键词策划。根据用户的【业务描述】，产出用于在小红书/抖音上搜索"
-    "『潜在买家发帖或评论提问』的搜索词。要点：①站在消费者视角用大白话（例：海运回国、留学回国行李、"
-    "美国寄回国、日本寄中国），不要行业黑话/卖家词（如货代、双清、头程、专线）；②覆盖不同说法、地区、"
-    "场景；③每行一个，15-30 个；④只输出关键词本身，不要编号、不要解释、不要空行。")
+    "『该业务的潜在买家发帖或评论提问』的搜索词。要点：①完全围绕用户描述的业务/品类，"
+    "不要假设任何特定行业；②站在消费者视角用大白话——他们会怎么问、怎么吐槽、怎么求推荐、"
+    "怎么描述需求，不要用卖家/行业黑话；③覆盖不同说法、人群、场景；④每行一个，15-30 个；"
+    "⑤只输出关键词本身，不要编号、不要解释、不要空行。")
 
 
 def gen_keywords(business):
@@ -633,6 +652,69 @@ def gen_keywords(business):
     text = _llm(f"业务描述：\n{business.strip()}", _KW_SYSTEM, max_tokens=600)
     lines = [l.strip().lstrip("-*·0123456789.、)（） ").strip() for l in text.splitlines()]
     return "\n".join(l for l in lines if l)
+
+
+def _extract_json(text):
+    """从模型输出里抠出 JSON 对象（容忍 ``` 围栏和前后废话）。"""
+    t = (text or "").strip()
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t, flags=re.S).strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        m = re.search(r"\{.*\}", t, re.S)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return None
+    return None
+
+
+_FILTERS_SYSTEM = (
+    "你是中文社媒获客的『线索筛选规则』生成器。根据用户的【业务描述】，输出一份筛选潜在买家帖子的规则，"
+    "严格只输出 JSON（不要解释、不要代码围栏），字段：\n"
+    '{"keyword_tiers":{"high":[最贴近该业务买家需求的强相关词],"mid":[中等相关],"low":[泛相关]},'
+    '"intent_strong":[强购买意图词，如 多少钱/报价/求推荐/哪家好/怎么选],'
+    '"intent_weak":[弱意图词，如 靠谱吗/求避雷/有没有推荐],'
+    '"seller_author_words":[该行业“卖家/同行”的自我标签词，作者命中则判为同行而非买家，应排除],'
+    '"negative_topic_words":[该品类下 科普/教程/测评/批发/B2B 等噪声词，命中则排除],'
+    '"use_overseas_bonus":false}\n'
+    "要求：所有词用中文、贴合该业务品类；每个列表 6-20 个；买家常用词不要放进 seller/negative；"
+    "仅当业务面向海外/回国人群时 use_overseas_bonus 才为 true。")
+
+
+def gen_filters(business):
+    """根据业务生成该类目的打分/筛选规则（关键词分级、卖家词、噪声词等）。"""
+    if not (business or "").strip():
+        raise RuntimeError("请先填写【业务】再生成筛选规则。")
+    obj = _extract_json(_llm(f"业务描述：\n{business.strip()}", _FILTERS_SYSTEM, max_tokens=1200))
+    if not isinstance(obj, dict) or not isinstance(obj.get("keyword_tiers"), dict):
+        raise RuntimeError("模型未返回有效的筛选规则 JSON，请重试或换个模型。")
+
+    def _slist(v):
+        return [str(x).strip() for x in v if str(x).strip()] if isinstance(v, list) else []
+
+    kt = obj.get("keyword_tiers", {})
+    out = {
+        "keyword_tiers": {"high": _slist(kt.get("high")), "mid": _slist(kt.get("mid")), "low": _slist(kt.get("low"))},
+        "intent_strong": _slist(obj.get("intent_strong")),
+        "intent_weak": _slist(obj.get("intent_weak")),
+        "seller_author_words": _slist(obj.get("seller_author_words")),
+        "negative_topic_words": _slist(obj.get("negative_topic_words")),
+        "use_overseas_bonus": bool(obj.get("use_overseas_bonus", False)),
+    }
+    if not any(out["keyword_tiers"].values()):
+        raise RuntimeError("生成的关键词分级为空，请重试。")
+    return out
+
+
+def _filters_summary(flt):
+    if not flt:
+        return ""
+    kt = flt.get("keyword_tiers", {})
+    return (f"高{len(kt.get('high', []))}/中{len(kt.get('mid', []))}/低{len(kt.get('low', []))}词"
+            f"·排除同行{len(flt.get('seller_author_words', []))}词"
+            f"·海外加分{'开' if flt.get('use_overseas_bonus') else '关'}")
 
 
 _CMT_SYSTEM = (
@@ -726,7 +808,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
     <div class="cfg-actions">
       <button onclick="saveConfig()">💾 保存业务/模板</button>
-      <button class="sec" onclick="genKeywords()">✨ 用业务生成关键词</button>
+      <button class="sec" onclick="genFromBiz()">✨ 按业务生成关键词+筛选规则</button>
+      <span id="filters-status" class="stat"></span>
     </div>
     <label>搜索关键词（每行一个，# 开头为注释；可手动改，改完保存再采集生效）</label>
     <textarea id="kwtext" style="height:96px"></textarea>
@@ -878,6 +961,8 @@ async function loadConfig(){
     if(c.ark_key_env)s.textContent='· 已用环境变量 ARK_API_KEY';
     else if(c.ark_key_set)s.textContent='· 已保存 Key（…'+c.ark_key_hint+'）';
     else s.textContent='· 未设置 Key';
+    document.getElementById('filters-status').textContent =
+      c.filters_set ? ('· 筛选规则（按业务）：'+c.filters_summary) : '· 筛选规则：默认（未按业务生成）';
   }catch(e){}
   try{const k=await (await fetch('/api/keywords')).json();document.getElementById('kwtext').value=k.keywords||'';}catch(e){}
 }
@@ -915,6 +1000,19 @@ async function genKeywords(){
   if(d.error){alert(d.error);return;}
   document.getElementById('kwtext').value=d.keywords||'';
   toast('已生成，检查后点「保存关键词」再采集');
+}
+async function genFilters(business){
+  toast('正在按业务生成筛选规则…');
+  const d=await (await fetch('/api/gen-filters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({business})})).json();
+  if(d.error){alert('筛选规则生成失败：'+d.error);return;}
+  document.getElementById('filters-status').textContent='· 筛选规则（按业务）：'+(d.summary||'已更新');
+  toast('筛选规则已更新（保存关键词后跑采集即生效）');
+}
+async function genFromBiz(){
+  const business=document.getElementById('biz').value.trim();
+  if(!business){alert('请先填写【业务】');return;}
+  await genKeywords();      // 生成搜索词（填入下方框，待你检查后保存）
+  await genFilters(business);  // 生成该类目的筛选/打分规则（自动保存）
 }
 let CUR=null;
 function openDrawer(l){
@@ -1069,7 +1167,9 @@ def run_serve(host, port, open_browser=True, auto_setup=True):
                 self._json({"business": c["business"], "templates": c["templates"],
                             "ark_model": c["ark_model"],
                             "ark_key_set": bool(key), "ark_key_env": bool(envkey),
-                            "ark_key_hint": key[-4:] if len(key) >= 4 else ""})
+                            "ark_key_hint": key[-4:] if len(key) >= 4 else "",
+                            "filters_set": bool(c.get("filters")),
+                            "filters_summary": _filters_summary(c.get("filters") or {})})
             elif path == "/api/models":
                 try:
                     self._json({"models": list_ark_models()})
@@ -1141,6 +1241,13 @@ def run_serve(host, port, open_browser=True, auto_setup=True):
             elif path == "/api/gen-keywords":
                 try:
                     self._json({"keywords": gen_keywords(str(data.get("business", "")))})
+                except Exception as e:
+                    self._json({"error": str(e)})
+            elif path == "/api/gen-filters":
+                try:
+                    flt = gen_filters(str(data.get("business", "")))
+                    save_aiconfig({"filters": flt})
+                    self._json({"ok": True, "summary": _filters_summary(flt)})
                 except Exception as e:
                     self._json({"error": str(e)})
             elif path == "/api/gen-comment":
@@ -1273,7 +1380,7 @@ def run_selftest():
         (P if cond else F)[0] += 1
         print(("  ✓ " if cond else "  ✗ ") + name)
 
-    cfg = load_config()
+    cfg = load_config(merge_business=False)   # 自检用默认配置，不受用户业务规则影响
     intent = (cfg.get("intent_strong", []) + cfg.get("intent_weak", []))
     now = datetime.now()
     nowms = int(now.timestamp() * 1000)
